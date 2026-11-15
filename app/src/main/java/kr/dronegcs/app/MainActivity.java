@@ -16,6 +16,7 @@ import android.provider.Settings;
 import android.view.WindowManager;
 import android.webkit.GeolocationPermissions;
 import android.webkit.JavascriptInterface;
+import android.webkit.ValueCallback;
 import android.webkit.ServiceWorkerClient;
 import android.webkit.ServiceWorkerController;
 import android.webkit.WebChromeClient;
@@ -28,9 +29,15 @@ import android.widget.Toast;
 
 import androidx.webkit.WebViewAssetLoader;
 
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -45,6 +52,9 @@ public class MainActivity extends Activity {
     private static final String HOST = "appassets.androidplatform.net";
     private static final String START_URL = "https://" + HOST + "/assets/index.html";
     private static final int REQ_LOCATION = 1;
+    private static final int REQ_FILE = 2;
+    /** 승인 서류 고르기(input type=file) 결과를 웹에 돌려줄 곳 */
+    private ValueCallback<Uri[]> fileCb;
 
     private WebView web;
     private WebViewAssetLoader assets;
@@ -95,6 +105,21 @@ public class MainActivity extends Activity {
         });
 
         web.setWebChromeClient(new WebChromeClient() {
+            /** 웹의 파일 고르기 칸(비행 승인 서류): 안드로이드 파일·사진 선택 창을 띄움 */
+            @Override
+            public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> cb, FileChooserParams p) {
+                if (fileCb != null) fileCb.onReceiveValue(null);
+                fileCb = cb;
+                try {
+                    startActivityForResult(p.createIntent(), REQ_FILE);
+                } catch (Exception e) {
+                    fileCb = null;
+                    cb.onReceiveValue(null);
+                    Toast.makeText(MainActivity.this, "파일 선택 창을 열 수 없습니다", Toast.LENGTH_SHORT).show();
+                }
+                return true;
+            }
+
             @Override
             public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback cb) {
                 if (hasLocationPermission()) {
@@ -136,6 +161,15 @@ public class MainActivity extends Activity {
         boolean ok = hasLocationPermission();
         for (Object[] p : pendingGeo) ((GeolocationPermissions.Callback) p[1]).invoke((String) p[0], ok, false);
         pendingGeo.clear();
+    }
+
+    @Override
+    protected void onActivityResult(int code, int result, Intent data) {
+        super.onActivityResult(code, result, data);
+        if (code == REQ_FILE && fileCb != null) {
+            fileCb.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(result, data));
+            fileCb = null;
+        }
     }
 
     /** 뒤로 가기: 웹 앱이 열린 창(사진, 시트, 다른 메뉴)을 먼저 닫고, 지도 화면에서는 두 번 눌러 종료 */
@@ -245,6 +279,40 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void openLocationSettings() {
             runOnUiThread(() -> startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)));
+        }
+
+        /** 공식 비행금지구역 자료(브이월드) 받기: 웹에서 직접 부르면 CORS로 막혀서 앱이 대신 받아 window.__nativeHttp(id, 상태코드, 본문)로 돌려줌.
+         *  안전을 위해 api.vworld.kr 주소만 허용 */
+        @JavascriptInterface
+        public void httpGet(String url, String id) {
+            new Thread(() -> {
+                int code = 0;
+                String body;
+                try {
+                    URL u = new URL(url);
+                    if (!"https".equals(u.getProtocol()) || !"api.vworld.kr".equals(u.getHost())) throw new Exception("허용되지 않은 주소");
+                    HttpURLConnection c = (HttpURLConnection) u.openConnection();
+                    c.setConnectTimeout(10000);
+                    c.setReadTimeout(20000);
+                    c.setRequestProperty("Referer", "https://" + HOST + "/");
+                    code = c.getResponseCode();
+                    InputStream is = code < 400 ? c.getInputStream() : c.getErrorStream();
+                    ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                    if (is != null) {
+                        byte[] buf = new byte[16384];
+                        int n;
+                        while ((n = is.read(buf)) > 0) bo.write(buf, 0, n);
+                        is.close();
+                    }
+                    body = bo.toString("UTF-8");
+                    c.disconnect();
+                } catch (Exception e) {
+                    code = 0;
+                    body = String.valueOf(e.getMessage());
+                }
+                String js = "window.__nativeHttp&&window.__nativeHttp(" + JSONObject.quote(id) + "," + code + "," + JSONObject.quote(body) + ")";
+                runOnUiThread(() -> web.evaluateJavascript(js, null));
+            }).start();
         }
 
         /** 탐지 위치 공유: 안드로이드 공유창(문자, 카카오톡, 메일 등)으로 글을 보냄 */
