@@ -242,7 +242,12 @@ td.r,th.r{text-align:right}
 .alerts .more{pointer-events:auto;align-self:flex-end;display:flex;gap:6px}
 .alerts .more button{min-height:36px;padding:0 12px;border-radius:8px;border:1px solid #ef444477;background:#200c12f2;color:#fecaca;font-size:12.5px}
 .mapwrap.has-alerts .locmsg{display:none}
-.mapwrap.draw-on .legend,.mapwrap.draw-on .simbar{visibility:hidden} /* 영역을 그리는 동안 한도 표시를 가리지 않게 */
+.mapwrap.draw-on .legend,.mapwrap.draw-on .simbar,.mapwrap.rs-on .legend,.mapwrap.rs-on .simbar{visibility:hidden}
+/* 여러 칸 재촬영: 고르는 동안 지도 아래에 뜨는 막대 */
+.pickbar{position:absolute;left:50%;transform:translateX(-50%);bottom:14px;z-index:7;display:flex;align-items:center;gap:8px;width:max-content;max-width:calc(100% - 24px);background:#0b1630f2;border:2px solid #60a5fa;border-radius:12px;padding:8px 8px 8px 14px}
+.pickbar>div{display:flex;flex-direction:column;gap:2px;min-width:0;margin-right:4px}
+.pickbar>div span{font-size:12.5px;color:var(--muted)}
+.pickbar .btn{width:auto;white-space:nowrap;padding-left:14px;padding-right:14px} /* 영역을 그리는 동안 한도 표시를 가리지 않게 */
 /* 칸 사진 시트가 열리면 알림을 시트 왼쪽으로 (가로: 시트가 오른쪽 패널보다 90px 더 덮음 / 세로: 지도 위 460px를 덮음) */
 @media (min-width:1001px){body.sheet-open .alerts{right:102px}}
 @media (min-width:601px) and (max-width:1000px){body.sheet-open .alerts{right:472px;width:calc(100% - 544px)}}
@@ -318,6 +323,10 @@ td.r,th.r{text-align:right}
             <span class="muted" id="simLabel" style="white-space:nowrap">경과</span><b class="num" id="simTime">00:00</b>
             <div class="seg" id="speedSeg"><button data-x="1">×1</button><button data-x="10">×10</button><button data-x="30">×30</button><button data-x="60">×60</button></div>
           </div>
+          <div class="pickbar" id="rsBar" hidden>
+            <div><b>재촬영할 칸을 누르세요</b><span id="rsInfo">칸을 눌러 고르세요</span></div>
+            <button class="btn" id="rsCancel">취소</button><button class="btn pri" id="rsGo" disabled>재촬영</button>
+          </div>
           <div class="legend">
             <div><span class="sw" style="border:2px solid #ffffff"></span>수색 영역</div>
             <div><span class="sw" style="background:#22c55e99"></span>탐색 완료</div>
@@ -385,6 +394,7 @@ td.r,th.r{text-align:right}
               <button class="btn" id="btnReset" disabled>임무 종료</button>
             </div>
             <button class="btn danger wide" id="btnRtl" style="margin-top:8px" hidden>전체 복귀 (RTL)</button>
+            <button class="btn wide" id="btnRsPick" style="margin-top:8px" hidden>재촬영할 칸 고르기</button>
             <p class="note" id="upNote"></p>
           </section>
 
@@ -867,7 +877,10 @@ const activeFleet=()=>usableFleet().filter(f=>f.enabled);
    (5) 비행시간 = 이륙 상승 + 오가는 길 + 칸 사이(고도 변화 포함) + 방향 바꿀 때 감속·가속 + 하강·착륙 (FM 모형)
    (6) 지형: 칸마다 주변 가장 높은 땅보다 설정 고도만큼 높게, 출발지↔구역은 가는 길의 가장 높은 땅보다 설정 고도만큼 높게 */
 const D=(p,q)=>Math.hypot(p.x-q.x,p.y-q.y);
-const groupBy=(list,key)=>{const m=new Map();list.forEach(c=>{const k=key(c);if(!m.has(k))m.set(k,[]);m.get(k).push(c)});return m};   // 줄(행·열)별 칸 묶음
+const pushTo=(m,k,v)=>{let a=m.get(k);if(!a)m.set(k,a=[]);a.push(v)};   // Map의 목록에 추가 (없으면 만듦)
+const groupBy=(list,key)=>{const m=new Map();list.forEach(c=>pushTo(m,key(c),c));return m};   // 줄(행·열)별 칸 묶음
+const trackOf=(t,rounds)=>({fi:t.fi,name:t.name,color:t.color,rounds});   // 드론 한 기의 궤적 묶음
+const detOf=id=>S.mission?S.mission.detections.find(x=>x.id===id):null;
 /* 기체 한도를 λ배 했을 때 ok(λ)가 참이 되는 가장 작은 λ (1e4배로도 안 되면 Infinity) */
 function minScale(ok){
   let lo=0,hi=1;while(!ok(hi)&&hi<1e4)hi*=2;if(!ok(hi))return Infinity;
@@ -913,9 +926,10 @@ function inPoly(x,y,P){
   for(let i=0,j=P.length-1;i<P.length;j=i++){const a=P.at(i),b=P.at(j);if((a.y>y)!==(b.y>y)&&x<(b.x-a.x)*(y-a.y)/(b.y-a.y)+a.x)inside=!inside}
   return inside;
 }
-function makeGrid(b,s){
+function makeGrid(b,s,dims){
   // 칸 크기는 촬영 줄 간격(s)보다 절대 크면 안 됨 → 올림. (반올림하면 칸이 최대 1.5배 커져 줄 사이에 안 찍힌 띠가 생길 수 있음)
-  const W=b.x1-b.x0,H=b.y1-b.y0,cols=Math.max(1,Math.ceil(W/s-1e-9)),rows=Math.max(1,Math.ceil(H/s-1e-9)),cw=W/cols,ch=H/rows,cells=[];
+  // dims {cols,rows}: 칸 수를 직접 정함 (재촬영: 원래 칸 하나를 정확히 n×m 작은 칸으로)
+  const W=b.x1-b.x0,H=b.y1-b.y0,cols=dims?dims.cols:Math.max(1,Math.ceil(W/s-1e-9)),rows=dims?dims.rows:Math.max(1,Math.ceil(H/s-1e-9)),cw=W/cols,ch=H/rows,cells=[];
   let unknown=0,areaM2=0;
   for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){
     const x=b.x0+(c+.5)*cw,y=b.y0+(r+.5)*ch;areaM2+=cw*ch;
@@ -1355,11 +1369,16 @@ function replan(fit=true){
   if(!S.launch||!members.length){renderSide();map.invalidate();return}
   const s=capability().spacing;
   let plan;
-  if(S.reshoot){   // 칸 하나만 다시 촬영: 배터리가 가장 많은 드론 1기
+  if(S.reshoot){   // 고른 칸만 다시 촬영 (칸 하나면 배터리가 가장 많은 드론 1기, 여러 칸이면 투입 드론이 나눠 맡음)
     // 열화상 카메라 화각 기준으로 칸을 작은 칸으로 다시 나눠 빈틈없이 훑음 (열화상이 일반 카메라보다 좁게 찍으므로)
-    members=[members.reduce((a,m)=>m.usable>a.usable?m:a)];
-    const r=S.reshoot,c=toXY(r.ll,S.launch),cap=capability();
-    plan=planRound(makeGrid({x0:c.x-r.cw/2,y0:c.y-r.ch/2,x1:c.x+r.cw/2,y1:c.y+r.ch/2},cap.tspacing),members,spec.speed);
+    // 고른 칸들을 감싸는 사각형을 원래 칸 경계에 맞춰 작은 칸으로 나누고, 고르지 않은 칸 자리는 뺌(off). c.pci = 원래 칸 번호
+    const P=S.reshootCtx.plan,cap=capability(),sel=new Set(S.reshoot.cis),cs=S.reshoot.cis.map(i=>P.cells[i]);
+    if(cs.length===1)members=[members.reduce((a,m)=>m.usable>a.usable?m:a)];
+    const r0=Math.min(...cs.map(c=>c.r)),r1=Math.max(...cs.map(c=>c.r)),c0=Math.min(...cs.map(c=>c.c)),c1=Math.max(...cs.map(c=>c.c));
+    const n=Math.max(1,Math.ceil(P.cw/cap.tspacing-1e-9)),m=Math.max(1,Math.ceil(P.ch/cap.tspacing-1e-9)),B=P.bounds;
+    const g=makeGrid({x0:B.x0+c0*P.cw,x1:B.x0+(c1+1)*P.cw,y0:B.y0+r0*P.ch,y1:B.y0+(r1+1)*P.ch},cap.tspacing,{cols:(c1-c0+1)*n,rows:(r1-r0+1)*m});
+    g.cells.forEach(c=>{const pi=(r0+Math.floor(c.r/m))*P.cols+c0+Math.floor(c.c/n);if(sel.has(pi))c.pci=pi;else{c.off=true;c.visited=true}});
+    plan=planRound(g,members,spec.speed);
     plan.fov=Math.min(spec.fov,spec.tfov);plan.shot=cap.tshot;   // 촬영 판정·촬영 간격도 열화상 기준
   }else if(S.mode==="draw"){
     if(!S.drawRect){renderSide();map.invalidate();return}
@@ -1398,6 +1417,7 @@ map.overlay=(ctx,E)=>{
     plan.cells.forEach((c,ci)=>{
       if(c.off)return;   // 영역 밖 칸 (예전 기록)
       const pp=c.poly.map(P);tracePoly(ctx,pp);
+      let B0=null;const bx=()=>B0||(B0=boxOf(pp));   // 칸의 화면 위 사각 범위 (글자 넣을 때만 계산)
       const te=ct&&ct[ci];
       ctx.fillStyle=te&&te.n?tempColor(te.s/te.n,tlo,thi,.62):c.visited?"rgba(34,197,94,.42)":c.later?"rgba(100,116,139,.38)":flying.has(c.owner)?"rgba(47,107,255,.36)":"rgba(255,255,255,.22)";   // 미탐색 = 연한 흰색 (빨강은 열화상 탐지에만)
       ctx.fill();
@@ -1409,18 +1429,24 @@ map.overlay=(ctx,E)=>{
       }
       if(c.reshot){   // 재촬영한 칸: 파란 테두리 + 왼쪽 위 ‘재촬영’ (칸이 화면에서 너무 작으면 글자는 생략 → 확대하면 나옴)
         tracePoly(ctx,pp);ctx.strokeStyle="#60a5fa";ctx.lineWidth=2.5;ctx.stroke();
-        const xs=pp.map(q=>q[0]),ys=pp.map(q=>q[1]),fs=Math.round(Math.min(10,(Math.max(...xs)-Math.min(...xs))/6,(Math.max(...ys)-Math.min(...ys))/3.2));
-        if(fs>=7)haloText(ctx,"재촬영",Math.min(...xs)+3,Math.min(...ys)+2,"#bfdbfe",`700 ${fs}px sans-serif`,"left","top");
+        const B=bx(),fs=Math.round(Math.min(10,B.w/6,B.h/3.2));
+        if(fs>=7)haloText(ctx,"재촬영",B.l+3,B.t+2,"#bfdbfe",`700 ${fs}px sans-serif`,"left","top");
+      }
+      if(S.rsPick&&S.rsPick.has(ci)){   // 재촬영으로 고른 칸: 파랗게 채우고 가운데 ✓
+        tracePoly(ctx,pp);ctx.fillStyle="rgba(96,165,250,.5)";ctx.fill();ctx.strokeStyle="#dbeafe";ctx.lineWidth=3;ctx.stroke();
+        const B=bx(),fs=Math.round(Math.min(sf(18),B.w/2.2,B.h/1.6));
+        if(fs>=8)haloText(ctx,"✓",(B.l+B.r)/2,(B.t+B.b)/2,"#ffffff",`800 ${fs}px sans-serif`,"center","middle");
       }
       if(te&&te.n){   // 열지도: 칸 왼쪽 아래에 평균 온도 숫자 (칸이 화면에서 너무 작으면 생략)
-        const xs=pp.map(q=>q[0]),ys=pp.map(q=>q[1]),w=Math.max(...xs)-Math.min(...xs),hgt=Math.max(...ys)-Math.min(...ys);
-        const fs=Math.round(Math.min(14,w/4.2,hgt/1.6));   // 칸 크기에 맞춘 글자 (너무 작아 못 읽을 크기면 생략 → 확대하면 나옴)
-        if(fs>=8)haloText(ctx,(te.s/te.n).toFixed(1)+"°",Math.min(...xs)+2,Math.max(...ys)-1,"#ffffff",`700 ${fs}px sans-serif`,"left","bottom");
+        const B=bx(),fs=Math.round(Math.min(14,B.w/4.2,B.h/1.6));   // 칸 크기에 맞춘 글자 (너무 작아 못 읽을 크기면 생략 → 확대하면 나옴)
+        if(fs>=8)haloText(ctx,(te.s/te.n).toFixed(1)+"°",B.l+2,B.b-1,"#ffffff",`700 ${fs}px sans-serif`,"left","bottom");
       }
     });
     const b=plan.bounds;
-    tracePoly(ctx,(plan.polyLL||[toLL(b.x0,b.y0,o),toLL(b.x1,b.y0,o),toLL(b.x1,b.y1,o),toLL(b.x0,b.y1,o)]).map(P));
-    ctx.strokeStyle="#ffffff";ctx.lineWidth=3;ctx.stroke();   // 수색 영역 테두리 (다각형이면 그 모양)
+    if(!S.reshoot){   // 수색 영역 테두리 (다각형이면 그 모양). 재촬영 비행은 고른 칸만 보이게 테두리 없음
+      tracePoly(ctx,(plan.polyLL||[toLL(b.x0,b.y0,o),toLL(b.x1,b.y0,o),toLL(b.x1,b.y1,o),toLL(b.x0,b.y1,o)]).map(P));
+      ctx.strokeStyle="#ffffff";ctx.lineWidth=3;ctx.stroke();
+    }
     (plan.holesLL||[]).forEach(h=>drawZone(ctx,h.map(P),"hole"));
     const home=P(o);
     ctx.lineJoin="round";ctx.lineCap="round";   // 급히 꺾이는 지그재그 끝에서 선이 뾰족하게 튀어나오지 않게 (드론이 많아 지도를 축소하면 잘 보였음)
@@ -1537,6 +1563,8 @@ map.onView=()=>{
   $("scale").querySelector("i").style.width=(n/mpp)+"px";
 };
 
+/* 화면 점들의 범위 {l,r,t,b,w,h} */
+function boxOf(pp){let l=Infinity,r=-Infinity,t=Infinity,b=-Infinity;for(const q of pp){if(q[0]<l)l=q[0];if(q[0]>r)r=q[0];if(q[1]<t)t=q[1];if(q[1]>b)b=q[1]}return{l,r,t,b,w:r-l,h:b-t}}
 /* 지도 탭 / 드래그 */
 map.onTap=ll=>{
   if(S.picking&&!isOpen()){
@@ -1547,6 +1575,11 @@ map.onTap=ll=>{
   if(map.drag)return;
   const g=S.plan;let ci=-1,c=null;
   if(g&&S.launch){const p=toXY(ll,S.launch);ci=cellAt(p.x,p.y);c=g.cells[ci]}
+  if(S.rsPick){   // 재촬영 칸 고르는 중: 누르면 넣고, 다시 누르면 뺌 (아직 안 찍힌 칸도 고를 수 있음)
+    if(!canReshoot())return rsEnd();
+    if(c&&!c.off){S.rsPick.has(ci)?S.rsPick.delete(ci):S.rsPick.add(ci);rsUi()}
+    return;
+  }
   if(!c||c.off){const z=airAt(ll);if(z)openZone(z.id);return}   // 칸 밖: 누른 곳의 공식 비행금지구역 정보·승인서
   if(!c.visited&&!hotCells().has(ci))return toast(`${cellName(ci)}은 아직 탐색하지 않은 칸입니다.`);
   openCell(ci);
@@ -2046,7 +2079,7 @@ function uploadMission(){
     const wpt=q=>{const ll=toLL(q.x,q.y,S.launch);return[+ll.lat.toFixed(7),+ll.lng.toFixed(7),+q.z.toFixed(1)]};
     if(!sendTele({type:"upload",mission:mid,drones:list.map(d=>({id:d.fi+1,home:homeOf(d),alt:spec.alt,speed:spec.speed,shot:+shot.toFixed(1),
       takeoff:+d.fp.takeoff.toFixed(1),cam:d.fp.cam,route:d.fp.pts.map(wpt)}))})){S.upload=null;return}
-    fbSaveMission(mid,S.reshootCtx?"reshoot":"uploaded",S.reshootCtx?{cell:S.reshootCtx.name}:undefined);
+    fbSaveMission(mid,S.reshootCtx?"reshoot":"uploaded",S.reshootCtx?{cell:S.reshootCtx.names.join(", "),cells:S.reshootCtx.cis}:undefined);
     setTimeout(()=>{ // 45초 안에 답이 없으면 실패 처리
       if(!S.upload||S.upload.mid!==mid)return;let ch=false;
       Object.values(S.upload.st).forEach(x=>{if(x.state==="wait"){x.state="fail";x.msg="응답 없음";ch=true}});
@@ -2193,7 +2226,8 @@ async function cellPhotos(ci){
   if(!fb.db)throw{code:"nofb"};
   const mid=m?m.id:S.upload&&S.upload.mid;if(!mid)throw{code:"nomission"};
   // 재촬영 비행 중: 지도는 잘게 나눈 칸이지만 드론은 원래 임무의 칸 번호로 사진을 올림 → 원래 칸으로 찾음
-  const rs=m&&m.reshootOf&&S.reshootCtx,g=rs?S.reshootCtx.plan:S.plan,qc=rs?S.reshootCtx.ci:ci;
+  const rs=m&&m.reshootOf&&S.reshootCtx,g=rs?S.reshootCtx.plan:S.plan,qc=rs?(S.plan.cells[ci]||{}).pci:ci;
+  if(qc==null)return [];
   const col=fb.db.collection("missions").doc(mid).collection("photos");
   const docsOf=q=>q.get().then(r=>r.docs.map(d=>({id:d.id,...d.data()})));
   let docs=await docsOf(col.where("cell","==",qc).limit(300));
@@ -2213,8 +2247,8 @@ async function openCell(ci){
   S.selCell=ci;map.invalidate();
   $("shTitle").textContent=cellName(ci);
   // 임무가 끝난 뒤: 이 칸만 다시 촬영
-  const canRe=!!S.mission&&!isOpen()&&!!S.launch;$("shFoot").hidden=!canRe;
-  if(canRe)$("shFoot").innerHTML=`<button class="btn pri wide" data-reshoot="${ci}">재촬영</button>`;
+  const canRe=canReshoot();$("shFoot").hidden=!canRe;
+  if(canRe)$("shFoot").innerHTML=`<div class="row2"><button class="btn pri" data-reshoot="${ci}">이 칸만 재촬영</button><button class="btn" data-rspick="${ci}">여러 칸 고르기</button></div>`;
   const tv=cellTemp(ci);
   $("shSub").textContent=`${own?own.name+" 구역 · ":""}${c.visited?"탐색 완료":"탐지 있음"} · 평균 ${tv!=null?tv.toFixed(1)+"°C":"온도 –"} · ${c.ll.lat.toFixed(5)}, ${c.ll.lng.toFixed(5)}`;
   $("shBody").innerHTML=`<div class="empty">사진을 불러오는 중…</div>`;$("sheet").hidden=false;document.body.classList.add("sheet-open");
@@ -2243,22 +2277,43 @@ function showPhoto(i){
   $("vMeta").innerHTML=`${p.reshoot?'<b style="color:#93c5fd">재촬영</b> · ':""}<b>${p.thermal?`열화상 탐지 ${p.det.temp!=null?p.det.temp.toFixed(1)+"°C · ":""}`:""}${esc(p.name)}</b> · ${S.viewIdx+1}/${list.length}<br><span class="num">${p.time?hms(p.time):"–"} · ${(+p.lat).toFixed(6)}, ${(+p.lng).toFixed(6)}${p.alt!=null?" · 고도 "+Math.round(p.alt)+"m":""}${p.tAvg!=null?" · 평균 "+p.tAvg.toFixed(1)+"°C":""}</span>`;
   $("viewer").hidden=false;
 }
-/* 칸 재촬영: 끝난 임무(또는 불러온 기록)의 칸 하나를 드론 1기로 다시 찍음.
-   새 임무를 만들지 않고, 찍은 사진·탐지는 원래 임무의 그 칸에 ‘재촬영’ 표시로 더함 (finishReshoot) */
-function reshootCell(ci){
-  const g=S.plan,c=g&&g.cells[ci],parent=S.mission;if(!c||!parent)return;
+/* 칸 재촬영: 끝난 임무(또는 불러온 기록)에서 고른 칸(하나 또는 여러 개)을 한 번 비행으로 다시 찍음.
+   새 임무를 만들지 않고, 찍은 사진·탐지는 원래 임무의 각 칸에 ‘재촬영’ 표시로 더함 (finishReshoot) */
+const canReshoot=()=>!!S.mission&&!isOpen()&&!!S.launch&&!S.reshootCtx;
+function reshootCells(cis){
+  const g=S.plan,parent=S.mission;if(!g||!parent)return;
   if(isOpen())return toast("임무 중에는 재촬영할 수 없습니다.");
-  const name=cellName(ci);
-  ask("재촬영",`${name} 구역을 재촬영합니까?`,()=>{
-    closeSheet();
-    S.reshootCtx={parent,plan:g,drones:S.drones,ci,name,launch:S.launch,launchSrc:S.launchSrc};
-    S.reshoot={ll:c.ll,cw:g.cw,ch:g.ch,name};
+  cis=[...new Set(cis)].filter(ci=>g.cells[ci]&&!g.cells[ci].off).sort((a,b)=>a-b);if(!cis.length)return;
+  const names=cis.map(cellName),name=cis.length===1?names[0]:`${cis.length}칸`;
+  ask("재촬영",cis.length===1?`${name} 구역을 재촬영합니까?`:`고른 ${cis.length}칸(${names.slice(0,5).join(", ")}${cis.length>5?" 등":""})을 한 번 비행으로 재촬영합니까?`,()=>{
+    closeSheet();rsEnd();
+    S.reshootCtx={parent,plan:g,drones:S.drones,cis,names,name,launch:S.launch,launchSrc:S.launchSrc};
+    S.reshoot={cis,name};
     S.mission=null;S.upload=null;renderAlerts();
     replan(true);
-    if(!S.plan||!S.drones.some(d=>d.path.length)){restoreAfterReshoot();return toast("이 칸에 갈 수 있는 드론이 없습니다.")}
+    const fail=!S.plan||!S.drones.some(d=>d.path.length)?"고른 칸에 갈 수 있는 드론이 없습니다."
+      :S.plan.laterCount||S.plan.roundsLeft===Infinity?"고른 칸이 많거나 멀어서 한 번 비행으로 다 찍을 수 없습니다. 칸을 줄이거나 투입 드론을 늘려 주세요.":"";
+    if(fail){restoreAfterReshoot();if(cis.length>1){S.rsPick=new Set(cis);rsUi()}return toast(fail)}
     if(prefs.source==="live")uploadMission();else startMission();
   });
 }
+const reshootCell=ci=>reshootCells([ci]);
+/* 여러 칸 고르기: 지도에서 칸을 눌러 고르고(다시 누르면 빠짐) ‘재촬영’으로 한 번에 */
+function rsStart(ci){
+  if(!canReshoot())return;
+  closeSheet();if(S.view!=="map")showView("map");
+  S.rsPick=new Set(ci!=null&&ci>=0?[ci]:[]);rsUi();
+}
+function rsEnd(){if(!S.rsPick)return;S.rsPick=null;rsUi()}
+function rsUi(){
+  const on=!!S.rsPick,n=on?S.rsPick.size:0;
+  $("rsBar").hidden=!on;$("map").parentElement.classList.toggle("rs-on",on);$("btnRsPick").hidden=on||!canReshoot();
+  if(on){$("rsInfo").textContent=n?`${n}칸 고름 · 다시 누르면 빠짐`:"칸을 눌러 고르세요";$("rsGo").disabled=!n;$("rsGo").textContent=n>1?`재촬영 (${n}칸)`:"재촬영"}
+  map.invalidate();
+}
+$("rsCancel").onclick=rsEnd;
+$("rsGo").onclick=()=>{if(S.rsPick&&S.rsPick.size)reshootCells([...S.rsPick])};
+$("btnRsPick").onclick=()=>rsStart(null);
 /* 재촬영 전 화면(원래 임무·칸·출발지)으로 되돌림 */
 function restoreAfterReshoot(){
   const x=S.reshootCtx;if(!x)return null;
@@ -2269,16 +2324,19 @@ function restoreAfterReshoot(){
 }
 /* 재촬영 비행이 끝나면: 사진·탐지·기록을 원래 임무에 합치고 저장된 기록도 갱신 */
 function finishReshoot(reason){
-  const m=S.mission;setWake(false);
-  const covered=S.plan.cells.length>0&&S.plan.cells.every(c=>c.visited),x=restoreAfterReshoot();if(!x)return;   // 작은 칸을 모두 찍어야 칸 전체 촬영
-  const p=x.parent,ci=x.ci;let n=0;
-  m.photos.forEach(ph=>{const q={...ph,id:p.photos.length+1,cell:ci,abs:m.started+ph.t*1000,reshoot:true};addTemp(p,ci,ph.tAvg,(q.abs-p.started)/1000);
-    p.photos.push(q);let arr=p.photoByCell.get(ci);if(!arr)p.photoByCell.set(ci,arr=[]);arr.push(q);n++});
+  const m=S.mission,sub=S.plan;setWake(false);
+  const x=restoreAfterReshoot();if(!x)return;
+  const p=x.parent;let n=0;
+  // 원래 칸마다: 그 칸의 작은 칸을 모두 찍어야 칸 전체 촬영
+  const part=x.cis.filter(ci=>{const mine=sub.cells.filter(c=>c.pci===ci);return!mine.length||!mine.every(c=>c.visited)});
+  m.photos.forEach(ph=>{const ci=(sub.cells[ph.cell]||{}).pci;if(ci==null)return;   // 고른 칸 사이를 지나가며 찍힌 사진은 뺌
+    const q={...ph,id:p.photos.length+1,cell:ci,abs:m.started+ph.t*1000,reshoot:true};addTemp(p,ci,ph.tAvg,(q.abs-p.started)/1000);
+    p.photos.push(q);pushTo(p.photoByCell,ci,q);n++});
   m.detections.forEach(d=>{if(d.extId&&p.detections.some(e=>e.extId===d.extId))return;
     const q=toXY(d,S.launch);p.detections.push({...d,id:p.detections.length+1,cell:cellAt(q.x,q.y),reshoot:true})});
-  if(covered)x.plan.cells[ci].visited=true;
-  x.plan.cells[ci].reshot=true;   // 지도에 ‘재촬영’ 표시
-  p.log.push({sim:p.t,clock:Date.now(),msg:`재촬영 · ${x.name}${m.source==="sim"?` · 사진 ${n}장`:""}${covered?"":" · 칸 전체를 다 찍지 못함"}${reason==="done"?"":" · 중단"}`});
+  x.cis.forEach(ci=>{if(!part.includes(ci))x.plan.cells[ci].visited=true;x.plan.cells[ci].reshot=true});   // 지도에 ‘재촬영’ 표시
+  const nm=ci=>x.names[x.cis.indexOf(ci)];
+  p.log.push({sim:p.t,clock:Date.now(),msg:`재촬영 · ${x.names.join(", ")}${m.source==="sim"?` · 사진 ${n}장`:""}${part.length?` · 다 찍지 못한 칸: ${part.map(nm).join(", ")}`:""}${reason==="done"?"":" · 중단"}`});
   // 저장된 기록(임무 기록·칸·사진) 갱신
   const h=history.find(h=>h.id===p.id);
   if(h){
@@ -2479,7 +2537,7 @@ function askRtl(){
 }
 function clearMission(fit=false){
   if(S.reshootCtx&&(!S.mission||S.mission.reshootOf)){restoreAfterReshoot();return}   // 재촬영 준비 취소 → 원래 임무로
-  fbStopDetections();S.mission=null;S.upload=null;S.reshoot=null;closeSheet();renderAlerts();
+  fbStopDetections();S.mission=null;S.upload=null;S.reshoot=null;rsEnd();closeSheet();renderAlerts();
   if(S.review){S.launch=S.review.launch;S.launchSrc=S.review.launchSrc;S.review=null}   // 기록 닫기: 원래 출발지로
   $("upNote").textContent="";$("simTime").textContent="00:00";
   replan(fit);renderView();updateBadge();
@@ -2597,7 +2655,7 @@ function cellCovered(c,a,p,seg,alt){
 }
 function recordPhoto(d,x,y,alt,ci){
   const m=S.mission,ll=toLL(x,y,S.launch),p={id:m.photos.length+1,drone:d.fi+1,name:d.name,lat:ll.lat,lng:ll.lng,alt,hdg:d.hdg,t:m.t,cell:ci,tAvg:simTemp(x,y,S.plan.cells[ci])};
-  m.photos.push(p);let arr=m.photoByCell.get(ci);if(!arr)m.photoByCell.set(ci,arr=[]);arr.push(p);
+  m.photos.push(p);pushTo(m.photoByCell,ci,p);
   if(!m.reshootOf)addTemp(m,ci,p.tAvg,m.t);   // 재촬영 사진은 끝날 때 원래 칸에 더함 (finishReshoot)
 }
 /* 시뮬레이션 열화상 사진 평균 온도: 지형 따라 완만하게 바뀌는 지표 온도 + 열원이 있는 칸은 조금 높게 + 사진마다 작은 흔들림 */
@@ -2659,7 +2717,7 @@ function dismissAlert(id){
   renderAlerts();if(S.view==="data")renderData();if(S.view==="detect")renderDetect();
 }
 function focusDetection(id){
-  const d=S.mission&&S.mission.detections.find(x=>x.id===id);if(!d)return;
+  const d=detOf(id);if(!d)return;
   if(S.view!=="map")showView("map");
   map.setCenter(d.lat,d.lng,Math.max(map.z,17));
   if(d.cell>=0)openCell(d.cell);
@@ -2777,6 +2835,7 @@ function updateButtons(){
   const between=isBetween();
   $("btnReset").disabled=!run;$("btnReset").textContent=run&&m.ending?"기록만 종료":"임무 종료";
   $("btnRtl").hidden=!live;$("btnRtl").disabled=!run;
+  const cre=canReshoot();$("btnRsPick").hidden=!cre||!!S.rsPick;if(S.rsPick&&!cre)rsEnd();   // 임무가 끝난 뒤에만 재촬영 칸 고르기
   const lock=run||between||u==="wait";   // 비행 중·회차 사이·업로드 중에는 구역을 바꾸지 못함
   ["btnLocate","btnPick","modeAuto","modeDraw","dMinus","dPlus"].forEach(id=>$(id).disabled=lock);
   $("dMin").disabled=lock||S.mode!=="draw"||!S.drawRect;
@@ -3176,9 +3235,10 @@ document.addEventListener("click",e=>{
   if(t.dataset.route)openRoutes(t.dataset.route);
   if(t.dataset.load)loadRecord(t.dataset.load);
   if(t.dataset.reshoot!=null)reshootCell(+t.dataset.reshoot);
+  if(t.dataset.rspick!=null)rsStart(+t.dataset.rspick);
   const id=+(t.dataset.see||t.dataset.ok||t.dataset.no||0);
   if(id&&S.mission){
-    const d=S.mission.detections.find(x=>x.id===id);if(!d)return;
+    const d=detOf(id);if(!d)return;
     if(t.dataset.see){focusDetection(d.id);return}
     if(t.dataset.ok){d.status="ok";logEvent(`탐지 #${d.id} 확인 처리`)}
     if(t.dataset.no){d.status="false";logEvent(`탐지 #${d.id} 오탐 처리`)}
@@ -3379,7 +3439,7 @@ function loadRecord(id){
   const rec=store.get("mrec."+id,null),gd=store.get("grid."+id,null);
   if(!rec||!gd)return toast("이 임무의 지도 기록이 없습니다.");
   if(!S.review)S.review={launch:S.launch,launchSrc:S.launchSrc};   // ‘기록 닫기’ 때 되돌릴 출발지
-  fbStopDetections();closeSheet();S.upload=null;S.reshoot=null;
+  fbStopDetections();closeSheet();rsEnd();S.upload=null;S.reshoot=null;
   S.launch={...rec.launch};S.launchSrc="record";
   const o=S.launch,cells=[];
   for(let r=0;r<gd.rows;r++)for(let c=0;c<gd.cols;c++){
@@ -3389,9 +3449,9 @@ function loadRecord(id){
   }
   S.plan={bounds:gd.bounds,cols:gd.cols,rows:gd.rows,cw:gd.cw,ch:gd.ch,cells,paths:[],costs:[],roundsLeft:0,laterCount:0,polyLL:gd.poly||null,holesLL:gd.holes||[],areaM2:gd.areaM2};S.drones=[];
   const photoByCell=new Map(),photos=gd.photos.map((a,i)=>{const p={id:i+1,cell:a[0],drone:a[1],name:droneName(a[1]),lat:a[2],lng:a[3],alt:a[4],t:a[5],hdg:a[6],reshoot:!!a[7],abs:a[8]||0,tAvg:a[9]!=null?a[9]:null};
-    let arr=photoByCell.get(p.cell);if(!arr)photoByCell.set(p.cell,arr=[]);arr.push(p);if(p.reshoot&&cells[p.cell])cells[p.cell].reshot=true;return p});   // 예전 기록: 재촬영 사진이 있는 칸
+    pushTo(photoByCell,p.cell,p);if(p.reshoot&&cells[p.cell])cells[p.cell].reshot=true;return p});   // 예전 기록: 재촬영 사진이 있는 칸
   const tk=store.get("track."+id,null),tracks={};
-  if(tk)tk.drones.forEach(d=>tracks[d.fi]={fi:d.fi,name:d.name,color:d.color,rounds:d.rounds.map(r=>({round:r.round,pts:unpackPts(r.pts)}))});
+  if(tk)tk.drones.forEach(d=>tracks[d.fi]=trackOf(d,d.rounds.map(r=>({round:r.round,pts:unpackPts(r.pts)}))));
   S.mission={id:rec.id,review:true,started:rec.started,ended:rec.ended,status:rec.status,source:rec.source,
     t:rec.t,round:rec.round,roundT0:rec.t,launch:{...rec.launch},launchSrc:"record",area:rec.area,bounds:gd.bounds,log:rec.log,samples:rec.samples,
     detections:rec.detections.map(d=>({...d,dismissed:true})),photos,photoByCell,tracks,
@@ -3425,7 +3485,7 @@ $("btnLoadRec").onclick=()=>{if(inReview())return clearMission();const v=$("recP
 /* ====================== 경로 확인 (드론별 실제 이동 내역) ======================
    회차가 끝날 때마다 각 드론의 궤적을 임무에 모아 두고, 임무가 끝나면 단순화해서 이 기기에 저장(최근 TRACK_KEEP건) */
 const TRACK_KEEP=20;
-const trackSlot=(tr,d)=>tr[d.fi]||(tr[d.fi]={fi:d.fi,name:d.name,color:d.color,rounds:[]});   // 드론별 궤적 묶음 (없으면 만듦)
+const trackSlot=(tr,d)=>tr[d.fi]||(tr[d.fi]=trackOf(d,[]));   // 드론별 궤적 묶음 (없으면 만듦)
 const trackHead=m=>({id:m.id,started:m.started,launch:m.launch,bounds:m.bounds,rounds:m.round});
 function archiveTrails(){
   const m=S.mission;if(!m||!m.tracks)return;
@@ -3449,9 +3509,9 @@ const unpackPts=a=>a.map(p=>p?{x:p[0],y:p[1]}:null);   // 저장 형식 [x,y] (0
 const segsOf=pts=>{const out=[];let cur=[];pts.forEach(p=>{if(!p){if(cur.length)out.push(cur);cur=[]}else cur.push(p)});if(cur.length)out.push(cur);return out};
 const trackLen=pts=>segsOf(pts).reduce((a,s)=>{for(let i=1;i<s.length;i++)a+=Math.hypot(s[i].x-s[i-1].x,s[i].y-s[i-1].y);return a},0);
 function saveTracks(m){
-  const drones=Object.values(m.tracks||{}).filter(t=>t.rounds.length).map(t=>({fi:t.fi,name:t.name,color:t.color,
-    rounds:t.rounds.map(r=>({round:r.round,len:Math.round(trackLen(r.pts)),
-      pts:segsOf(r.pts).map(sg=>simplify(sg,1.5).map(p=>[Math.round(p.x*10)/10,Math.round(p.y*10)/10])).reduce((a,sg,i)=>a.concat(i?[0]:[],sg),[])}))}));
+  const drones=Object.values(m.tracks||{}).filter(t=>t.rounds.length).map(t=>trackOf(t,
+    t.rounds.map(r=>({round:r.round,len:Math.round(trackLen(r.pts)),
+      pts:segsOf(r.pts).map(sg=>simplify(sg,1.5).map(p=>[Math.round(p.x*10)/10,Math.round(p.y*10)/10])).reduce((a,sg,i)=>a.concat(i?[0]:[],sg),[])}))));
   if(!drones.length)return false;
   return store.set("track."+m.id,{...trackHead(m),drones});
 }
@@ -3459,7 +3519,7 @@ function saveTracks(m){
 function trackData(src){
   if(src==="cur"){
     const m=S.mission;if(!m)return null;const tr={};
-    Object.values(m.tracks||{}).forEach(t=>tr[t.fi]={fi:t.fi,name:t.name,color:t.color,rounds:t.rounds.map(r=>({round:r.round,pts:r.pts,len:trackLen(r.pts)}))});
+    Object.values(m.tracks||{}).forEach(t=>tr[t.fi]=trackOf(t,t.rounds.map(r=>({round:r.round,pts:r.pts,len:trackLen(r.pts)}))));
     if(isRunning())S.drones.forEach(d=>{
       if(d.trail.length<2)return;
       trackSlot(tr,d).rounds.push({round:m.round,pts:d.trail,len:trackLen(d.trail),live:d.state!=="landed"&&d.state!=="ready"?d.pos:null});
@@ -3567,6 +3627,7 @@ window.gcsBack=()=>{
   if(!$("routeView").hidden){closeRoutes();return true}
   if(!$("confirm").hidden){$("confirm").hidden=true;return true}
   if(!$("sheet").hidden){closeSheet();return true}
+  if(S.rsPick){rsEnd();return true}
   if(S.picking||map.drag){S.picking=false;$("btnPick").classList.remove("warn");armDraw(false);return true}
   if(S.view==="settings"&&S.setPane){openSetPane(null);return true}
   if(S.view!=="map"){showView("map");return true}
