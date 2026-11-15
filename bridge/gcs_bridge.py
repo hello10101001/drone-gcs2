@@ -27,6 +27,8 @@
        PX4 파라미터:  TRIG_INTERFACE = MAVLink,  TRIG_MODE = Distance (on command)
 
   3) 앱 연결: 설정 → 드론 실시간 위치 → '실시간' → 브리지 주소 → 연결
+     비밀번호: 브리지를 --token 비밀번호 로 켜고(또는 환경 변수 GCS_BRIDGE_TOKEN), 앱의 '브리지 비밀번호'에 같은 값을 넣습니다.
+       비밀번호가 맞아야 드론 위치를 받고 명령을 보낼 수 있습니다. 비밀번호 없이 켜면 같은 네트워크의 누구나 접속할 수 있습니다.
        같은 패드에서 실행(Termux 등):  ws://127.0.0.1:8766
        노트북 등 다른 기기에서 실행:   wss://<노트북 IP>:8766  (앱이 https이므로 TLS 필요)
      TLS 인증서 (한 번만):
@@ -36,15 +38,19 @@
      패드 Chrome에서 https://<노트북 IP>:8766 을 한 번 열어 '고급 → 계속'으로 인증서를 허용해 두세요.
 
 업로드되는 임무 (기체별)
-  이륙(NAV_TAKEOFF, 기체 현재 위치) → 속도(DO_CHANGE_SPEED) → 거리 간격 촬영 시작(DO_SET_CAM_TRIGG_DIST)
-  → 웨이포인트들(NAV_WAYPOINT, 상대고도) → 촬영 중지 → 복귀(NAV_RETURN_TO_LAUNCH)
+  이륙(NAV_TAKEOFF, 기체 현재 위치, takeoff 고도) → 속도(DO_CHANGE_SPEED)
+  → 웨이포인트들(NAV_WAYPOINT, 점마다 출발지 대비 고도) — 첫 촬영 칸에서 거리 간격 촬영 시작(DO_SET_CAM_TRIGG_DIST),
+    마지막 촬영 칸에서 촬영 중지 → 복귀(NAV_RETURN_TO_LAUNCH)
+  앱이 지형 고도 자료로 점마다 고도를 정해 보냄: 칸 위에서는 그 주변 가장 높은 땅 + 설정 고도,
+  출발지↔구역 사이(첫 칸 위·마지막 칸 위·출발지 위 점)는 가는 길의 가장 높은 땅 + 설정 고도.
+  출발지보다 낮은 골짜기 위 웨이포인트는 상대고도가 음수가 될 수 있음 (PX4는 'below home' 경고만 냄)
 
 이륙 순서 (PX4): 시동(ARM) → MISSION 모드. PX4는 시동이 걸린 상태에서만 미션 모드로 들어가며,
   착륙 상태에서 미션 모드가 되면 TAKEOFF 항목부터 실행합니다. 시동 후 일정 시간(COM_DISARM_PRFLT)
   안에 이륙하지 않으면 PX4가 시동을 끄므로 두 명령을 곧바로 이어 보냅니다.
 
-안전 한도 (어기면 업로드 거부): 고도 5~150m(국내 비행 고도 상한), 속도 1~15m/s,
-  웨이포인트 600개 이하, 모든 점이 출발지 반경 5km 이내.
+안전 한도 (어기면 업로드 거부): 비행 고도 설정 5~150m(국내 비행 고도 상한, 땅 기준), 속도 1~15m/s,
+  웨이포인트 600개 이하, 모든 점이 출발지 반경 5km 이내, 점마다 출발지 대비 고도 -300~600m, 이륙 고도 ≥ 비행 고도.
   실기체 첫 비행 전에 반드시 PX4 SITL(시뮬레이터)로 먼저 확인하고, 조종기로 즉시 수동 전환할 수 있게 준비하세요.
   QGroundControl을 함께 켜도 됩니다 (브리지는 MAVLink 시스템 번호 254를 써서 QGC의 255와 겹치지 않음).
 
@@ -52,16 +58,18 @@
   드론→앱 {"type":"telemetry","id":1,"lat":..,"lng":..,"alt":상대고도m,"bat":%,"hdg":도,"spd":m/s,"mode":"MISSION","armed":true,"ts":기체시각(초)}
           {"type":"status","id":1,"text":"Preflight Fail: ...","sev":3}
           {"type":"detection","id":1,"lat":..,"lng":..,"alt":..,"temp":36.4,"uid":"..."}   (열화상 탐지를 브리지로 보낼 때, 보통은 Firebase로 올림)
-  앱→드론 {"type":"upload","mission":"M..","drones":[{"id":1,"home":[lat,lng],"alt":100,"speed":8,"shot":39.1,"route":[[lat,lng],..]}]}
+  앱→드론 {"type":"upload","mission":"M..","drones":[{"id":1,"home":[lat,lng],"alt":100,"speed":8,"shot":39.1,
+                   "takeoff":120.5,"cam":[1,40],"route":[[lat,lng,상대고도m],..]}]}
+          (alt = 땅에서 비행 고도 설정값, takeoff = 이륙 고도, cam = 촬영 시작·끝 웨이포인트 번호. route 점에 고도가 없으면 alt, takeoff·cam이 없으면 예전 방식)
           {"type":"start","ids":[1,2]}   {"type":"rtl","ids":[1,2]}
   결과    {"type":"ack","op":"upload|start|rtl","id":1,"ok":true,"msg":"..."}
 
 외부 패키지 없이 동작합니다 (실기체 연결에만 pymavlink 필요).
 """
-import argparse, asyncio, base64, hashlib, json, math, queue, random, ssl, struct, sys, threading, time
+import argparse, asyncio, base64, hashlib, hmac, json, math, os, queue, random, ssl, struct, sys, threading, time
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-LIMITS = {"alt": (5, 150), "speed": (1, 15), "points": 600, "radius": 5000}
+LIMITS = {"alt": (5, 150), "speed": (1, 15), "points": 600, "radius": 5000, "rel": (-300, 600)}
 
 lock = threading.Lock()
 state = {}        # id -> 최신 텔레메트리
@@ -70,6 +78,7 @@ clients = set()
 vehicles = {}     # sysid -> {"conn", "autopilot", "armed"}
 jobs = {}         # 연결 -> 작업 큐
 demo = None       # 데모 모드 상태
+TOKEN = ""        # 접속 비밀번호 (--token 또는 환경 변수 GCS_BRIDGE_TOKEN). 비어 있으면 누구나 접속
 
 
 def ack(op, sid, ok, msg):
@@ -91,10 +100,17 @@ def ws_frame(text):
     return head + data
 
 
-async def ws_reader(reader):
-    buf = b""
+async def send_one(writer, obj):
+    writer.write(ws_frame(json.dumps(obj, ensure_ascii=False)))
+    await writer.drain()
+
+
+async def ws_reader(reader, writer, peer):
+    """앱 메시지를 읽음. 첫 메시지는 {"type":"auth","token":"…"}: 비밀번호가 맞아야 위치를 받고 명령을 보낼 수 있음"""
+    buf, authed = b"", False
     while True:
-        h = await reader.readexactly(2)
+        # 비밀번호 확인 전에는 10초 안에 메시지가 와야 함 (아무것도 안 보내고 연결만 붙잡는 것 방지)
+        h = await (reader.readexactly(2) if authed else asyncio.wait_for(reader.readexactly(2), 10))
         fin, op, ln = h[0] & 0x80, h[0] & 0x0F, h[1] & 0x7F
         if ln == 126:
             ln = struct.unpack("!H", await reader.readexactly(2))[0]
@@ -108,10 +124,35 @@ async def ws_reader(reader):
             buf += data
             if fin:
                 try:
-                    on_app_message(json.loads(buf.decode("utf-8")))
+                    m = json.loads(buf.decode("utf-8"))
                 except Exception as e:
                     print("[앱 메시지 오류]", e)
+                    m = None
                 buf = b""
+                if isinstance(m, dict) and m.get("type") == "auth":
+                    ok = not TOKEN or hmac.compare_digest(str(m.get("token", "")).encode(), TOKEN.encode())
+                    if not ok:
+                        await asyncio.sleep(1)   # 비밀번호 맞히기 시도를 느리게
+                        print(f"[앱 연결 거부] {peer} 비밀번호가 맞지 않음")
+                        await send_one(writer, {"type": "auth", "ok": False,
+                                                "msg": "브리지 비밀번호가 맞지 않습니다" if m.get("token") else "브리지 비밀번호가 필요합니다"})
+                        return
+                    if not authed:
+                        authed = True
+                        clients.add(writer)
+                        print(f"[앱 연결] {peer} (현재 {len(clients)}개)")
+                    await send_one(writer, {"type": "auth", "ok": True})
+                elif not authed:
+                    if TOKEN:
+                        await send_one(writer, {"type": "auth", "ok": False, "msg": "브리지 비밀번호가 필요합니다"})
+                        return
+                    authed = True                        # 비밀번호 없이 켠 브리지 + 예전 앱
+                    clients.add(writer)
+                    print(f"[앱 연결] {peer} (현재 {len(clients)}개)")
+                    if m is not None:
+                        on_app_message(m)
+                elif m is not None:
+                    on_app_message(m)
 
 
 async def handle(reader, writer):
@@ -134,9 +175,7 @@ async def handle(reader, writer):
         writer.write(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                       f"Sec-WebSocket-Accept: {accept}\r\n\r\n").encode())
         await writer.drain()
-        clients.add(writer)
-        print(f"[앱 연결] {peer} (현재 {len(clients)}개)")
-        await ws_reader(reader)
+        await ws_reader(reader, writer, peer)
     except (asyncio.IncompleteReadError, ConnectionError, asyncio.TimeoutError, asyncio.LimitOverrunError):
         pass
     finally:
@@ -167,11 +206,20 @@ async def broadcaster(interval):
 
 
 # ======================= 앱 명령 처리 =======================
+def route_of(d):
+    """[(위도, 경도, 출발지 대비 고도)], 이륙 고도, (촬영 시작, 끝) 번호. 고도·takeoff·cam이 없으면 예전 방식(모두 alt)"""
+    alt = float(d["alt"])
+    pts = [(float(p[0]), float(p[1]), float(p[2]) if len(p) > 2 else alt) for p in d["route"]]
+    cam = d.get("cam") or (0, len(pts) - 1)
+    return pts, float(d.get("takeoff", alt)), (int(cam[0]), int(cam[1]))
+
+
 def check_route(d):
     """업로드 전 안전 검사. 문제가 있으면 이유(문자열), 없으면 None"""
     try:
         alt, spd, route = float(d["alt"]), float(d["speed"]), d["route"]
         hlat, hlng = map(float, d["home"])
+        pts, takeoff, (i0, i1) = route_of(d)
     except Exception:
         return "임무 형식이 올바르지 않습니다"
     if not LIMITS["alt"][0] <= alt <= LIMITS["alt"][1]:
@@ -182,10 +230,17 @@ def check_route(d):
         return "웨이포인트가 없습니다"
     if len(route) > LIMITS["points"]:
         return f"웨이포인트 {len(route)}개가 한도({LIMITS['points']}개)를 넘습니다"
-    mlng = 111320 * math.cos(math.radians(hlat))
-    for la, lo in route:
+    zlo, zhi = LIMITS["rel"]
+    if not alt <= takeoff <= zhi:
+        return f"이륙 고도 {takeoff:.0f}m가 허용 범위({alt:.0f}~{zhi}m)를 벗어납니다"
+    if not 0 <= i0 <= i1 < len(pts):
+        return "촬영 시작·끝 웨이포인트 번호가 올바르지 않습니다"
+    mlng = m_per_lng(hlat)
+    for la, lo, z in pts:
         if math.hypot((la - hlat) * 111320, (lo - hlng) * mlng) > LIMITS["radius"]:
             return f"출발지에서 {LIMITS['radius'] / 1000:.0f}km를 넘는 웨이포인트가 있습니다"
+        if not zlo <= z <= zhi:
+            return f"웨이포인트 고도 {z:.0f}m(출발지 대비)가 허용 범위({zlo}~{zhi}m)를 벗어납니다"
     return None
 
 
@@ -233,6 +288,16 @@ MISSION_RESULT = {1: "오류", 2: "지원 안 하는 프레임", 3: "지원 안 
 NAN = float("nan")                   # PX4: 방향(yaw) NaN = 현재 방향 유지
 
 
+def tel(sid):
+    """기체별 텔레메트리 항목 (없으면 만듦). lock 안에서 부름"""
+    return state.setdefault(sid, {"type": "telemetry", "id": sid})
+
+
+def m_per_lng(lat):
+    """그 위도에서 경도 1도의 길이(m)"""
+    return 111320 * math.cos(math.radians(lat))
+
+
 def handle_msg(conn, msg, mavutil):
     sid = msg.get_srcSystem()
     if not 1 <= sid <= MAX_SYSID:
@@ -244,20 +309,20 @@ def handle_msg(conn, msg, mavutil):
                 return
             armed = bool(msg.base_mode & 128)
             vehicles[sid] = {"conn": conn, "autopilot": msg.autopilot, "armed": armed}
-            d = state.setdefault(sid, {"type": "telemetry", "id": sid})
+            d = tel(sid)
             d["armed"] = armed
             try:
                 d["mode"] = mavutil.mode_string_v10(msg)
             except Exception:
                 pass
         elif t == "GLOBAL_POSITION_INT":
-            d = state.setdefault(sid, {"type": "telemetry", "id": sid})
+            d = tel(sid)
             d.update(lat=msg.lat / 1e7, lng=msg.lon / 1e7, alt=round(msg.relative_alt / 1000, 1),
                      spd=round(math.hypot(msg.vx, msg.vy) / 100, 1), ts=msg.time_boot_ms / 1000)
             if msg.hdg != 65535:
                 d["hdg"] = msg.hdg / 100
         elif t in ("SYS_STATUS", "BATTERY_STATUS") and msg.battery_remaining >= 0:
-            state.setdefault(sid, {"type": "telemetry", "id": sid})["bat"] = msg.battery_remaining
+            tel(sid)["bat"] = msg.battery_remaining
         elif t == "STATUSTEXT":    # 사전 점검 실패 등 PX4 안내 문구
             text = msg.text.decode("utf-8", "replace") if isinstance(msg.text, bytes) else str(msg.text)
             events.append({"type": "status", "id": sid, "text": text.strip("\0 ").strip(), "sev": msg.severity})
@@ -278,14 +343,16 @@ def wait_for(conn, sid, types, mavutil, pred=None, timeout=4.0):
 
 def build_items(d):
     hlat, hlng = map(float, d["home"])
-    alt, spd, shot = float(d["alt"]), float(d["speed"]), float(d.get("shot", 0))
-    items = [(FRAME_REL_ALT, CMD["TAKEOFF"], 0, 0, 0, NAN, hlat, hlng, alt),      # (frame, cmd, p1~p4, lat, lng, alt)
+    spd, shot = float(d["speed"]), float(d.get("shot", 0))
+    pts, takeoff, (i0, i1) = route_of(d)
+    items = [(FRAME_REL_ALT, CMD["TAKEOFF"], 0, 0, 0, NAN, hlat, hlng, takeoff),  # (frame, cmd, p1~p4, lat, lng, alt)
              (FRAME_MISSION, CMD["SPEED"], 1, spd, -1, 0, 0, 0, 0)]               # 1 = 대지 속도
-    if shot > 0:
-        items.append((FRAME_MISSION, CMD["CAM_DIST"], shot, 0, 1, 0, 0, 0, 0))    # shot m마다 촬영, 시작 즉시 1장
-    items += [(FRAME_REL_ALT, CMD["WAYPOINT"], 0, 0, 0, NAN, float(la), float(lo), alt) for la, lo in d["route"]]
-    if shot > 0:
-        items.append((FRAME_MISSION, CMD["CAM_DIST"], 0, 0, 0, 0, 0, 0, 0))       # 촬영 중지
+    for i, (la, lo, z) in enumerate(pts):
+        items.append((FRAME_REL_ALT, CMD["WAYPOINT"], 0, 0, 0, NAN, la, lo, z))
+        if shot > 0 and i == i0:
+            items.append((FRAME_MISSION, CMD["CAM_DIST"], shot, 0, 1, 0, 0, 0, 0))   # 첫 촬영 칸부터 shot m마다 촬영, 시작 즉시 1장
+        if shot > 0 and i == i1:
+            items.append((FRAME_MISSION, CMD["CAM_DIST"], 0, 0, 0, 0, 0, 0, 0))      # 마지막 촬영 칸에서 촬영 중지
     items.append((FRAME_MISSION, CMD["RTL"], 0, 0, 0, 0, 0, 0, 0))
     return items
 
@@ -393,11 +460,19 @@ def mav_worker(conn_str):
 # ======================= 데모 드론 =======================
 def demo_upload(sid, d):
     with lock:
+        known = sid in demo["drones"]   # 데모에 없는 기체 번호 (실기체로 치면 연결 안 된 드론) → 실패 응답
+    if not known:
+        return ack("upload", sid, False, f"데모: 드론 {sid}번이 없습니다 (--drones {len(demo['drones'])})")
+    with lock:
         la, lo = demo["home"]
-        mlng = 111320 * math.cos(math.radians(la))
-        pts = [(0.0, 0.0)] + [((p[1] - lo) * mlng, (p[0] - la) * 111320) for p in d["route"]] + [(0.0, 0.0)]
-        demo["drones"][sid] = {"route": pts, "t0": None, "speed": float(d["speed"]), "alt": float(d["alt"]),
-                               "rtl": False, "prev": 0.0, "flown": 0.0, "sent": 0}
+        mlng = m_per_lng(la)
+        route, takeoff, _ = route_of(d)
+        pts = [(0.0, 0.0, 0.0), (0.0, 0.0, takeoff)] + [((p[1] - lo) * mlng, (p[0] - la) * 111320, p[2]) for p in route]
+        if len(d["route"][-1]) < 3:
+            pts.append((0.0, 0.0, pts[-1][2]))              # 예전 형식: 마지막 칸 → 출발지 위
+        pts.append((0.0, 0.0, 0.0))                         # 착륙
+        demo["drones"][sid] = {"route": pts, "t0": None, "speed": float(d["speed"]),
+                               "rtl": False, "prev": 0.0, "flown": 0.0, "sent": 0, "hdg": 0.0}
     ack("upload", sid, True, f"데모: 웨이포인트 {len(d['route'])}개 업로드 완료")
 
 
@@ -415,7 +490,9 @@ def demo_rtl(sid):
         v = demo["drones"].get(sid)
         ok = bool(v and v.get("t0") and not v.get("done") and v.get("pos"))
         if ok:
-            v.update(route=[v["pos"], (0.0, 0.0)], t0=time.time(), rtl=True, prev=v["prev"] + v["flown"], flown=0.0, sent=0)
+            x, y, z = v["pos"]
+            v.update(route=[(x, y, z), (0.0, 0.0, z), (0.0, 0.0, 0.0)], t0=time.time(), rtl=True,
+                     prev=v["prev"] + v["flown"], flown=0.0, sent=0)
     ack("rtl", sid, ok, "데모: 복귀 모드로 전환" if ok else "비행 중이 아닙니다")
 
 
@@ -427,42 +504,45 @@ def demo_worker(n, accel):
         out, now = {}, time.time()
         with lock:
             la, lo = demo["home"]
-            mlng = 111320 * math.cos(math.radians(la))
+            mlng = m_per_lng(la)
             for k, v in demo["drones"].items():
                 tel = {"type": "telemetry", "id": k, "lat": la, "lng": lo, "alt": 0.0, "bat": 100.0, "hdg": 0.0,
                        "spd": 0, "mode": "STANDBY", "armed": False, "ts": round(now * accel, 2)}
                 if v.get("route") and v.get("t0") is not None:
-                    # 실제 PX4처럼: 제자리 수직 이륙 → 임무 고도로 경로 비행 → 출발지 위에서 수직 착륙 (복귀 명령이면 이륙 단계 없음)
-                    pts, spd, amax = v["route"], v["speed"], v["alt"]
-                    seg = [math.dist(pts[i], pts[i + 1]) for i in range(len(pts) - 1)]
-                    up = 0.0 if v["rtl"] else amax
-                    total, eff = sum(seg), (now - v["t0"]) * accel * spd
-                    dd, i = min(max(eff - up, 0.0), total), 0
-                    while i < len(seg) - 1 and dd > seg[i]:
-                        dd -= seg[i]
+                    # 실제 PX4처럼: 제자리 수직 이륙 → 점마다 정해진 고도로 경로 비행(고도가 바뀌면 상승 3m/s·하강 1.5m/s)
+                    # → 출발지 위에서 수직 착륙. 구간 시간 = 수평·수직 중 오래 걸리는 쪽
+                    pts, spd = v["route"], v["speed"]
+                    dur = [max(math.dist(pts[i][:2], pts[i + 1][:2]) / spd,
+                               (pts[i + 1][2] - pts[i][2]) / 3.0 if pts[i + 1][2] > pts[i][2] else (pts[i][2] - pts[i + 1][2]) / 1.5)
+                           for i in range(len(pts) - 1)]
+                    total, el = sum(dur), (now - v["t0"]) * accel
+                    tt, i = min(el, total), 0
+                    while i < len(dur) - 1 and tt > dur[i]:
+                        tt -= dur[i]
                         i += 1
                     a, b = pts[i], pts[i + 1]
-                    f = dd / seg[i] if seg[i] else 1
-                    x, y = a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f
-                    landed = eff >= up + total + amax
-                    alt = 0.0 if landed else (eff if eff < up else amax if eff < up + total else up + total + amax - eff)
-                    v["flown"] = min(eff, up + total + amax)
+                    f = min(1.0, tt / dur[i]) if dur[i] else 1.0
+                    x, y, alt = (a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f)
+                    landed = el >= total
+                    v["flown"] = min(el, total)
                     # 지나간 웨이포인트 위치도 보냄 (배속 시험에서 한 번에 수십 m씩 움직여도 모서리를 건너뛰지 않게)
-                    passed = i if eff - up < total else len(pts) - 1
+                    passed = len(pts) - 1 if landed else i
                     cum = 0.0
                     for j in range(1, passed + 1):
-                        cum += seg[j - 1]
+                        cum += dur[j - 1]
                         if j > v.get("sent", 0):
                             events.append({"type": "telemetry", "id": k, "lat": round(la + pts[j][1] / 111320, 7), "lng": round(lo + pts[j][0] / mlng, 7),
-                                           "alt": amax, "spd": spd, "mode": "MISSION", "armed": True,
-                                           "ts": round(v["t0"] * accel + (up + cum) / spd, 2)})
+                                           "alt": round(pts[j][2], 1), "spd": spd, "mode": "MISSION", "armed": j < len(pts) - 1,
+                                           "ts": round(v["t0"] * accel + cum, 2)})
                     v["sent"] = max(v.get("sent", 0), passed)
-                    v["pos"], v["done"] = (x, y), landed
-                    tel.update(lat=round(la + y / 111320, 7), lng=round(lo + x / mlng, 7), alt=round(alt, 1),
-                               bat=round(max(5.0, 100 - (v["prev"] + v["flown"]) / spd / 12), 1),
-                               hdg=round((math.degrees(math.atan2(b[0] - a[0], b[1] - a[1])) + 360) % 360, 1),
+                    v["pos"], v["done"] = (x, y, alt), landed
+                    if math.dist(a[:2], b[:2]) > 0.01:
+                        v["hdg"] = (math.degrees(math.atan2(b[0] - a[0], b[1] - a[1])) + 360) % 360
+                    last = len(pts) - 2
+                    tel.update(lat=round(la + y / 111320, 7), lng=round(lo + x / mlng, 7), alt=round(0.0 if landed else alt, 1),
+                               bat=round(max(5.0, 100 - (v["prev"] + v["flown"]) / 12), 1), hdg=round(v["hdg"], 1),
                                spd=0 if landed else spd, armed=not landed,
-                               mode="LAND" if landed or eff >= up + total else ("TAKEOFF" if eff < up else "RTL" if v["rtl"] or i == len(seg) - 1 else "MISSION"))
+                               mode="LAND" if landed or i >= last else ("TAKEOFF" if i == 0 and not v["rtl"] else "RTL" if v["rtl"] else "MISSION"))
                     if not landed and alt > 50 and random.random() < 0.15 * accel / 600:   # 데모 열화상 탐지
                         fire = random.random() < 0.25
                         temp = random.uniform(55, 220) if fire else random.uniform(33.0, 37.5)   # 34°C 미만은 앱이 거름
@@ -486,9 +566,13 @@ async def main():
     ap.add_argument("--drones", type=int, default=4, help="데모 드론 수")
     ap.add_argument("--accel", type=float, default=1, help="데모 시간 배속 (시험용)")
     ap.add_argument("--rate", type=float, default=2, help="앱으로 보내는 횟수(초당)")
+    ap.add_argument("--token", default=os.environ.get("GCS_BRIDGE_TOKEN", ""),
+                    help="앱 접속 비밀번호 (앱 설정 → 브리지 비밀번호에 같은 값). 환경 변수 GCS_BRIDGE_TOKEN으로도 지정")
     ap.add_argument("--cert")
     ap.add_argument("--key")
     a = ap.parse_args()
+    global TOKEN
+    TOKEN = a.token
     if a.demo == bool(a.mav):
         ap.error("--demo 또는 --mav 중 하나만 지정하세요.")
     if a.demo:
@@ -502,6 +586,8 @@ async def main():
         ctx.load_cert_chain(a.cert, a.key)
     server = await asyncio.start_server(handle, a.host, a.port, ssl=ctx)
     print(f"[브리지] {'wss' if ctx else 'ws'}://{a.host}:{a.port} 에서 앱 연결 대기 ({'데모' if a.demo else '실기체'})")
+    if not TOKEN:
+        print("[브리지] 주의: 비밀번호 없이 실행 중입니다. 같은 네트워크의 누구나 드론에 명령을 보낼 수 있습니다. --token 으로 비밀번호를 정하세요.")
     asyncio.create_task(broadcaster(1 / a.rate))
     async with server:
         await server.serve_forever()

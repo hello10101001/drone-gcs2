@@ -246,5 +246,16 @@ public class MainActivity extends Activity {
         public void openLocationSettings() {
             runOnUiThread(() -> startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)));
         }
+
+        /** 탐지 위치 공유: 안드로이드 공유창(문자, 카카오톡, 메일 등)으로 글을 보냄 */
+        @JavascriptInterface
+        public void share(String text) {
+            runOnUiThread(() -> {
+                Intent send = new Intent(Intent.ACTION_SEND);
+                send.setType("text/plain");
+                send.putExtra(Intent.EXTRA_TEXT, text);
+                startActivity(Intent.createChooser(send, "탐지 위치 공유"));
+            });
+        }
     }
 }

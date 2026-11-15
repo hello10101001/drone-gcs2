@@ -10,8 +10,19 @@ android {
         applicationId 'kr.dronegcs.app'
         minSdk 24          // Android 7.0 이상
         targetSdk 34
-        versionCode 1
-        versionName '1.0'
+        // GitHub에서 빌드할 때마다 번호가 1씩 올라감 (설치된 앱 위에 업데이트로 설치됨)
+        versionCode((System.getenv('GITHUB_RUN_NUMBER') ?: '1').toInteger())
+        versionName "1.0.${System.getenv('GITHUB_RUN_NUMBER') ?: '0'}"
+    }
+
+    // 항상 같은 키로 서명 → 새로 빌드한 APK를 기존 앱을 지우지 않고 덮어 설치할 수 있음 (태블릿에 저장된 임무 기록 유지)
+    signingConfigs {
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
     }
 
     // 웹 앱(web/ 폴더)을 그대로 앱에 넣음 — 웹 파일을 한 곳에서만 관리
@@ -22,8 +33,12 @@ android {
     }
 
     buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
         release {
             minifyEnabled false
+            signingConfig signingConfigs.debug
         }
     }
 
