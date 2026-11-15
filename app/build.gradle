@@ -50,4 +50,5 @@ android {
 
 dependencies {
     implementation 'androidx.webkit:webkit:1.11.0'   // WebViewAssetLoader: 앱 안 파일을 https 주소로 열기 (위치 권한에 필요)
+    implementation 'com.github.mik3y:usb-serial-for-android:3.11.0'   // 텔레메트리 무선기(FTDI·CP210x·CH34x·CDC) USB 직접 연결
 }

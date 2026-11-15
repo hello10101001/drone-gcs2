@@ -244,7 +244,7 @@ td.r,th.r{text-align:right}
 .mapwrap.has-alerts .locmsg{display:none}
 .mapwrap.draw-on .legend,.mapwrap.draw-on .simbar,.mapwrap.rs-on .simbar{visibility:hidden}
 .mapwrap.rs-on .legend{bottom:84px}
-.mapwrap.rs-pick .alerts,.mapwrap.rs-pick .locmsg{display:none}   /* 칸을 고르는 동안은 알림이 칸을 가리지 않게 */
+.mapwrap.rs-on .alerts,.mapwrap.rs-on .locmsg{display:none}   /* 칸을 고르는 동안은 알림이 칸을 가리지 않게 */
 /* 여러 칸 재촬영: 고르는 동안 지도 아래에 뜨는 막대 */
 .pickbar{position:absolute;left:50%;transform:translateX(-50%);bottom:14px;z-index:7;display:flex;align-items:center;gap:8px;width:min(460px,calc(100% - 24px));background:#0b1630f2;border:2px solid #60a5fa;border-radius:12px;padding:8px 8px 8px 14px}
 .pickbar>div{flex:1;display:flex;flex-direction:column;gap:2px;min-width:0}
@@ -328,8 +328,8 @@ td.r,th.r{text-align:right}
             <div class="seg" id="speedSeg"><button data-x="1">×1</button><button data-x="10">×10</button><button data-x="30">×30</button><button data-x="60">×60</button></div>
           </div>
           <div class="pickbar" id="rsBar" hidden>
-            <div><b id="rsTitle">재촬영</b><span id="rsInfo"></span></div>
-            <button class="btn" id="rsCancel">취소</button><button class="btn pri" id="rsGo">칸 고르기</button>
+            <div><b>재촬영할 칸을 누르세요</b><span id="rsInfo"></span></div>
+            <button class="btn" id="rsCancel">취소</button><button class="btn pri" id="rsGo" disabled>재촬영 시작</button>
           </div>
           <div class="legend">
             <div><span class="sw" style="border:2px solid #ffffff"></span>수색 영역</div>
@@ -339,7 +339,7 @@ td.r,th.r{text-align:right}
             <div><span class="sw" style="background:#64748b99"></span>다음 회차</div>
             <div><span class="sw" style="background:#ef4444;width:12px;height:12px;border-radius:50%;box-shadow:0 0 0 2px #fff"></span>열화상 탐지 지점</div>
             <div><span class="sw blink" style="background:#ef4444aa;outline:2px solid #ef4444"></span>탐지된 칸</div>
-            <div><span class="sw" style="background:transparent;outline:2px solid #60a5fa"></span>재촬영한 칸</div>
+            <div id="lgReshot" style="display:none"><span class="sw" style="background:transparent;outline:2px solid #60a5fa"></span>재촬영한 칸</div>
           </div>
           <div class="warnbar" id="warnBar" role="alert" hidden></div>
           <div class="heatlg" id="heatLg" hidden><b>칸별 평균 온도</b><i></i><div><span class="num" id="heatLo">–</span><span class="num" id="heatHi">–</span></div></div>
@@ -527,9 +527,10 @@ td.r,th.r{text-align:right}
             <h3>드론 실시간 위치</h3>
             <div class="form">
               <label>위치 데이터<select id="sSource"><option value="sim">시뮬레이션</option><option value="live">실시간 (드론 텔레메트리)</option></select></label>
-              <label>연결 방식<select id="sLink"><option value="ws">브리지 (gcs_bridge.py)</option><option value="fb">Firebase (드론 LTE 직접)</option></select></label>
-              <label id="lbWsUrl">브리지 주소<input id="sWsUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="ws://127.0.0.1:8766" style="font-size:14px"></label>
-              <label id="lbWsToken">브리지 비밀번호<input id="sWsToken" type="password" autocomplete="off" spellcheck="false" placeholder="브리지를 --token으로 켰을 때" style="font-size:14px"></label>
+              <label>연결 방식<select id="sLink"><option value="usb">텔레메트리 무선기 (태블릿 USB에 직접)</option><option value="ws">브리지 · Wi-Fi (gcs_bridge.py)</option><option value="fb">Firebase (드론 LTE 직접)</option></select></label>
+              <label id="lbBaud">무선기 속도<select id="sBaud"><option value="57600">57600 (SiK 기본)</option><option value="115200">115200</option><option value="38400">38400</option></select></label>
+              <label id="lbWsUrl"><span id="tWsUrl">브리지 주소</span><input id="sWsUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="ws://127.0.0.1:8766" style="font-size:14px"></label>
+              <label id="lbWsToken"><span id="tWsToken">브리지 비밀번호</span><input id="sWsToken" type="password" autocomplete="off" spellcheck="false" placeholder="브리지를 --token으로 켰을 때" style="font-size:14px"></label>
             </div>
             <div class="row2" style="margin-top:12px">
               <button class="btn pri" id="btnTele">연결</button>
@@ -538,7 +539,10 @@ td.r,th.r{text-align:right}
             <dl class="kv" style="margin-top:12px"><dt>상태</dt><dd id="teleState">꺼짐</dd><dt>수신 기체</dt><dd class="num" id="teleCount">0기</dd></dl>
             <div class="tbl" id="teleTable" style="margin-top:10px"></div>
             <p class="note" id="fbLinkNote" hidden>드론의 라즈베리파이(drone_agent.py)가 LTE로 Firebase Realtime Database에 위치를 올리고 명령을 받습니다. 설정 → Firebase에서 운영자 계정으로 로그인해야 하며, firebaseConfig에 databaseURL이 있어야 합니다. 드론 번호(droneId) 1, 2, 3…이 드론 관리의 드론 1, 2, 3…과 연결됩니다.</p>
-            <p class="note" id="wsLinkNote">드론과 앱 사이에서 gcs_bridge.py가 MAVLink 위치를 받아 이 주소로 보내 줍니다. 기체 번호(MAV_SYS_ID) 1, 2, 3…이 드론 관리의 드론 1, 2, 3…과 차례로 연결됩니다. <span id="wsNote">앱을 https로 열었다면 다른 기기의 브리지는 wss:// 주소여야 합니다(같은 패드에서 돌리는 127.0.0.1은 ws:// 그대로 됩니다).</span></p>
+            <p class="note" id="usbLinkNote" hidden><b>텔레메트리 무선기</b>: 지상용 무선기를 태블릿 USB(OTG 젠더)에 꽂고 ‘연결’을 누르세요. 처음에는 USB 사용 허용 창이 뜹니다. 드론 위치·경로 업로드·이륙·복귀를 무선기로 주고받고(보통 1~2km), 라즈베리파이의 탐지 알림도 무선기로 받습니다.<br>
+              사진은 무선기로 보내기엔 너무 커서, 태블릿이 파이의 Wi-Fi에 닿을 때(보통 착륙 뒤) 위 ‘파이 Wi-Fi 주소’로 받아 옵니다. 비워 두면 사진은 받지 않습니다.</p>
+            <p class="note" id="wsLinkNote"><b>인터넷 없이 Wi-Fi로</b>: 태블릿을 드론 라즈베리파이의 핫스팟 Wi-Fi에 연결하고 주소에 <span class="num">ws://10.42.0.1:8766</span>(파이 핫스팟 기본 주소)을 넣으세요. 파이에서 브리지를 --local로 켜 두면 위치·명령에 더해 탐지 알림과 칸 사진도 Wi-Fi로 바로 받습니다.<br>
+              드론과 앱 사이에서 gcs_bridge.py가 MAVLink 위치를 받아 이 주소로 보내 줍니다. 기체 번호(MAV_SYS_ID) 1, 2, 3…이 드론 관리의 드론 1, 2, 3…과 차례로 연결됩니다. <span id="wsNote">앱을 https로 열었다면 다른 기기의 브리지는 wss:// 주소여야 합니다(같은 패드에서 돌리는 127.0.0.1은 ws:// 그대로 됩니다).</span></p>
           </section>
           <section class="card" data-sp="fb">
             <h3>Firebase (사진 서버 · 드론 연결)</h3>
@@ -642,6 +646,7 @@ td.r,th.r{text-align:right}
 <div class="confirm" id="confirm" hidden><section class="card"><h3 id="cfTitle"></h3><p class="note" id="cfText" style="font-size:14px"></p><div class="row2" style="margin-top:16px"><button class="btn" id="cfNo">취소</button><button class="btn pri" id="cfYes">확인</button></div></section></div>
 
 <script src="firebase-link.js"></script>
+<script src="mavlink-usb.js"></script>
 <script>
 (function(){
 "use strict";
@@ -676,7 +681,7 @@ const store={
   del(k){try{localStorage.removeItem("gcs."+k)}catch(e){}}
 };
 const DEFAULT_SPEC={flight:20,reserve:20,speed:8,climb:3,descent:1.5,wind:0,windDir:0,alt:100,fov:82,tfov:57,overlap:30,fwd:70,photoMB:8};   // 상승·하강 속도 = PX4 기본값 (MPC_Z_V_AUTO_UP/DN)
-const DEFAULT_PREFS={uiScale:1,mapType:"sat",mult:30,fallback:{lat:33.4996,lng:126.5312},wake:true,targets:true,source:"sim",wsUrl:"ws://127.0.0.1:8766",wsToken:"",link:"ws",airKey:"",airDomain:"",airOn:true,fbConfig:"",fbEmail:"",thermalMin:34,fireC:45,vibe:true};
+const DEFAULT_PREFS={uiScale:1,mapType:"sat",mult:30,fallback:{lat:33.4996,lng:126.5312},wake:true,targets:true,source:"sim",wsUrl:"ws://127.0.0.1:8766",wsToken:"",link:"ws",baud:57600,airKey:"",airDomain:"",airOn:true,fbConfig:"",fbEmail:"",thermalMin:34,fireC:45,vibe:true};
 const STALE_MS=5000,MIN_ALT=10; // 5초간 위치가 안 오면 신호 끊김, 10m 미만 고도는 촬영으로 안 침
 const newDrone=i=>({name:"드론 "+(i+1),enabled:true,battery:100});
 const defaultFleet=()=>Array.from({length:4},(_,i)=>newDrone(i));
@@ -808,14 +813,14 @@ function createMap(canvas){
   /* 터치 / 마우스: 한 손가락 = 이동(또는 그리기), 두 손가락 = 확대·축소 */
   const pts=new Map();let last=null,pinch=null,tap=null,drawing=false;
   const local=e=>{const r=canvas.getBoundingClientRect();return[e.clientX-r.left,e.clientY-r.top]};
+  const two=()=>{const[a,b]=[...pts.values()];return{m:[(a[0]+b[0])/2,(a[1]+b[1])/2],d:Math.hypot(a[0]-b[0],a[1]-b[1])}};   // 두 손가락: 가운데·거리
   canvas.addEventListener("pointerdown",e=>{
-    canvas.setPointerCapture(e.pointerId);const p=local(e);pts.set(e.pointerId,p);
+    try{canvas.setPointerCapture(e.pointerId)}catch(err){}const p=local(e);pts.set(e.pointerId,p);
     if(pts.size===1){
       last=p;tap={x:p[0],y:p[1],t:performance.now()};
       if(E.drag&&E.drag.start(E.fromScreen(p[0],p[1])))drawing=true;
     }else if(pts.size===2&&!drawing){
-      const[a,b]=[...pts.values()];tap=null;
-      pinch={d:Math.hypot(a[0]-b[0],a[1]-b[1]),z:E.z,m:[(a[0]+b[0])/2,(a[1]+b[1])/2]};
+      tap=null;const t=two();pinch={d:t.d,z:E.z,m:t.m};
     }
   });
   canvas.addEventListener("pointermove",e=>{
@@ -824,7 +829,7 @@ function createMap(canvas){
     if(drawing){E.drag.move(E.fromScreen(p[0],p[1]));E.invalidate();return}
     if(pts.size===1&&last){E.panBy(p[0]-last[0],p[1]-last[1]);last=p}
     else if(pts.size===2&&pinch){
-      const[a,b]=[...pts.values()],m=[(a[0]+b[0])/2,(a[1]+b[1])/2],d=Math.hypot(a[0]-b[0],a[1]-b[1]);
+      const{m,d}=two();
       E.panBy(m[0]-pinch.m[0],m[1]-pinch.m[1]);pinch.m=m;
       E.zoomAround(pinch.z+Math.log2(d/pinch.d),m[0],m[1]);
     }
@@ -1995,12 +2000,13 @@ const num=v=>v==null||v===""||!isFinite(+v)?null:+v;
 /* 기체의 최신 위치 (5초 안에 받은 것만), 없으면 null */
 const liveOf=id=>{const L=S.live[id];return L&&L.lat!=null&&Date.now()-L.t<=STALE_MS?L:null};
 function teleStatus(state,msg){tele.state=state;tele.msg=msg;teleUi();if(S.view==="settings"&&!S.setPane)renderSetMenu()}
-const linkName=()=>prefs.link==="fb"?"Firebase":"브리지";
+const linkName=()=>prefs.link==="fb"?"Firebase":prefs.link==="usb"?"무선기":"브리지";
 const teleOk=()=>{if(tele.state==="ok")return;teleStatus("ok","연결됨");toast("드론 위치 수신을 시작했습니다.")};
 function teleConnect(){
   teleClose(true);tele.authFail=false;
   if(prefs.source!=="live")return;
   if(prefs.link==="fb")return fbLinkConnect();
+  if(prefs.link==="usb")return usbLinkConnect();
   const url=(prefs.wsUrl||"").trim();
   if(!/^wss?:\/\//i.test(url))return teleStatus("bad","주소는 ws:// 또는 wss:// 로 시작해야 합니다.");
   if(!APP&&location.protocol==="https:"&&/^ws:\/\//i.test(url)&&!/^ws:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/i.test(url))
@@ -2019,7 +2025,7 @@ function teleAttach(ws,msg){
   ws.onclose=e=>{
     if(tele.ws!==ws)return;tele.ws=null;
     const why=e&&e.reason||"연결 끊김";
-    if(/로그인|운영자로 등록|권한이 없/.test(why))tele.authFail=true;
+    if(/로그인|운영자로 등록|권한이 없|허용하지 않|찾지 못했|쓸 수 없/.test(why))tele.authFail=true;   // 사람이 손봐야 하는 문제는 자동으로 다시 시도하지 않음
     if(tele.authFail){if(tele.state!=="bad")teleStatus("bad",why);return}
     teleStatus("bad",why+" · 3초 뒤 다시 연결합니다");
     if(prefs.source==="live")tele.timer=setTimeout(teleConnect,3000);
@@ -2039,11 +2045,50 @@ function fbLinkConnect(){
   teleAttach(ws,"Firebase 연결 중…");
   ws.onopen=()=>{if(tele.ws===ws)teleOk()};
 }
+/* 텔레메트리 무선기 (mavlink-usb.js): 브리지 없이 태블릿이 직접 MAVLink */
+function usbLinkConnect(){
+  if(typeof UsbMavLink==="undefined")return teleStatus("bad","mavlink-usb.js를 불러오지 못했습니다.");
+  if(!UsbMavLink.available()){tele.authFail=true;return teleStatus("bad","이 기기에서는 USB 무선기를 쓸 수 없습니다 (안드로이드 앱 또는 PC 크롬에서 가능).")}
+  const ws=new UsbMavLink({baud:prefs.baud||57600});
+  teleAttach(ws,"무선기 여는 중…");
+  ws.onwait=msg=>{if(tele.ws===ws)teleStatus("wait",msg)};
+  ws.onopen=()=>{if(tele.ws===ws)teleOk()};
+}
 function teleClose(silent){
   clearTimeout(tele.timer);
   if(tele.ws){const w=tele.ws;tele.ws=null;try{w.close()}catch(e){}}
   if(!silent)teleStatus("off","꺼짐");
 }
+/* Wi-Fi 브리지(파이)의 사진: 주소·목록 */
+const bridgeHttp=()=>(prefs.wsUrl||"").trim().replace(/^ws/i,"http").replace(/(\/\/[^/]+).*$/,"$1");
+const bridgeFile=rel=>`${bridgeHttp()}/files/${String(rel).split("/").map(encodeURIComponent).join("/")}${prefs.wsToken?"?t="+encodeURIComponent(prefs.wsToken):""}`;
+const viaBridge=()=>prefs.source==="live"&&(prefs.link==="ws"||(prefs.link==="usb"&&/^wss?:\/\//i.test(prefs.wsUrl||"")));   // 무선기 방식: 파이 Wi-Fi 주소가 있으면 사진은 파이에서
+/* 사진 한 장 도착 → 칸 평균 온도에 더함 (Firebase 방식의 fbWatchPhotos와 같은 일) */
+function onBridgePhoto(v,lat,lng){
+  const m=S.mission,t=num(v.tempAvgC);if(!m||m.source!=="live"||(v.mission&&v.mission!==m.id)||t==null||!v.uid||m.ctempSeen.has(v.uid))return;
+  m.ctempSeen.add(v.uid);
+  let ci=Number.isInteger(v.cell)?v.cell:-1;if(ci<0&&lat!=null&&lng!=null&&S.plan){const q=toXY({lat,lng},S.launch);ci=cellAt(q.x,q.y)}
+  addTemp(m,ci,t,Math.max(0,num(v.takenAt)?(v.takenAt-m.started)/1000:m.t));
+  if(S.view==="data")renderData();saveLate(m);
+}
+/* 무선기 방식: 태블릿이 파이의 Wi-Fi에 닿으면(보통 착륙 뒤) 사진(칸 평균 온도)과 탐지 사진을 받아 옴. 10초마다, 안 닿으면 조용히 넘어감 */
+const piSync={busy:false,ok:false};
+async function syncFromPi(){
+  const m=S.mission;
+  if(prefs.link!=="usb"||!viaBridge()||!m||m.source!=="live"||piSync.busy)return;
+  piSync.busy=true;
+  try{
+    const q=`mission=${encodeURIComponent(m.id)}${prefs.wsToken?"&t="+encodeURIComponent(prefs.wsToken):""}`;
+    const get=async p=>{const ac=new AbortController(),tm=setTimeout(()=>ac.abort(),5000);
+      try{const r=await fetch(`${bridgeHttp()}/${p}?${q}`,{signal:ac.signal,cache:"no-store"});if(!r.ok)throw new Error(r.status);return await r.json()}finally{clearTimeout(tm)}};
+    const[phs,dets]=await Promise.all([get("photos"),get("detections")]);
+    if(S.mission!==m)return;
+    phs.forEach(p=>onBridgePhoto({...p,mission:m.id},p.lat,p.lng));
+    dets.forEach(d=>onTeleMsg(d));
+    if(!piSync.ok){piSync.ok=true;toast("파이 Wi-Fi에 닿았습니다. 사진과 탐지 사진을 받아 옵니다.")}
+  }catch(e){piSync.ok=false}finally{piSync.busy=false}
+}
+setInterval(syncFromPi,10000);
 function onTeleMsg(m){
   if(!m||typeof m!=="object")return;
   if(m.type==="auth"){
@@ -2056,9 +2101,13 @@ function onTeleMsg(m){
   if(m.type==="ack")return onAck(m,id);
   if(m.type==="status")return onStatusText(m,id);
   if(m.type==="detection"){
-    if(lat==null||lng==null)return;
-    return ingestDetection({droneId:id,lat,lng,temp:num(m.temp),kind:m.kind,conf:num(m.conf),alt:num(m.alt),extId:m.uid?"b:"+m.uid:null,src:"브리지"});
+    if(lat==null||lng==null||(m.mission&&S.mission&&m.mission!==S.mission.id))return;   // 다른 임무의 탐지(파이에 남아 있던 것)는 거름
+    const same=S.mission&&m.uid&&S.mission.detections.find(d=>d.extId==="b:"+m.uid);   // 무선기로 먼저 받은 탐지에 나중에 Wi-Fi로 사진이 옴
+    if(same){if(!same.img&&m.img){same.img=bridgeFile(m.img);saveLate(S.mission);if(S.view==="detect")renderDetect()}return}
+    return ingestDetection({droneId:id,lat,lng,temp:num(m.temp??m.tempC),kind:m.kind,conf:num(m.conf),alt:num(m.alt),extId:m.uid?"b:"+m.uid:null,src:"브리지",
+      at:num(m.takenAt)||undefined,img:m.img?bridgeFile(m.img):null});
   }
+  if(m.type==="photo")return onBridgePhoto(m,lat,lng);
   if(lat==null||lng==null||Math.abs(lat)>90||Math.abs(lng)>180||(lat===0&&lng===0))return; // GPS 미수신(0,0) 무시
   const L=S.live[id]||(S.live[id]={}),prevT=L.t,prevTs=L.ts,prevLL=L.lat!=null?{lat:L.lat,lng:L.lng}:null;
   const prevMode=L.mode;
@@ -2137,7 +2186,7 @@ function uploadMission(){
     const homeOf=d=>{const L=fresh(d)||S.launch;return[+L.lat.toFixed(7),+L.lng.toFixed(7)]};
     // route: [위도, 경도, 출발지 대비 고도 m] — 지형에 맞춘 고도, 곧은 줄 가운데 칸은 뺀 웨이포인트. takeoff: 이륙 고도, cam: 촬영 시작·끝 웨이포인트 번호
     const wpt=q=>{const ll=toLL(q.x,q.y,S.launch);return[+ll.lat.toFixed(7),+ll.lng.toFixed(7),+q.z.toFixed(1)]};
-    if(!sendTele({type:"upload",mission:mid,drones:list.map(d=>({id:d.fi+1,home:homeOf(d),alt:spec.alt,speed:spec.speed,shot:+shot.toFixed(1),
+    if(!sendTele({type:"upload",mission:mid,grid:gridDoc(),reshoot:!!S.reshootCtx,drones:list.map(d=>({id:d.fi+1,home:homeOf(d),alt:spec.alt,speed:spec.speed,shot:+shot.toFixed(1),
       takeoff:+d.fp.takeoff.toFixed(1),cam:d.fp.cam,route:d.fp.pts.map(wpt)}))})){S.upload=null;return}
     fbSaveMission(mid,S.reshootCtx?"reshoot":"uploaded",S.reshootCtx?{cell:S.reshootCtx.names.join(", "),cells:S.reshootCtx.cis}:undefined);
     setTimeout(()=>{ // 45초 안에 답이 없으면 실패 처리
@@ -2223,6 +2272,12 @@ async function rtdbSignIn(email,pw){
   }catch(e){fb.rtdb="로그인 실패 · "+(e.message||e)}
   fbStatus(fb.state,fb.msg);
 }
+/* 사진의 칸 번호 계산용 격자: x=(lng-lng0)·111320·cos(lat0), y=(lat-lat0)·111320, cell=floor((y-y0)/ch)·cols+floor((x-x0)/cw).
+   재촬영 중이면 원래 임무의 격자 (같은 칸 번호로 사진을 올리게) */
+function gridDoc(){
+  const g=S.reshootCtx?S.reshootCtx.plan:S.plan,o=S.reshootCtx?S.reshootCtx.launch:S.launch;
+  return{lat0:o.lat,lng0:o.lng,x0:g.bounds.x0,y0:g.bounds.y0,cw:g.cw,ch:g.ch,cols:g.cols,rows:g.rows};
+}
 async function fbSaveMission(mid,status,extra){
   if(!fb.db||prefs.source!=="live")return;
   try{
@@ -2232,7 +2287,7 @@ async function fbSaveMission(mid,status,extra){
       const g=S.plan,GP=FS.GeoPoint;
       const next=isBetween(),doc={createdAt:now,updatedAt:now,status,round:next?S.mission.round+1:1,home:new GP(S.launch.lat,S.launch.lng),alt:spec.alt,speed:spec.speed,shot:capability().shot,thermalMinC:prefs.thermalMin,
         // 사진의 칸 번호 계산용: x=(lng-lng0)·111320·cos(lat0), y=(lat-lat0)·111320, cell=floor((y-y0)/ch)·cols+floor((x-x0)/cw)
-        grid:{lat0:S.launch.lat,lng0:S.launch.lng,x0:g.bounds.x0,y0:g.bounds.y0,cw:g.cw,ch:g.ch,cols:g.cols,rows:g.rows},
+        grid:gridDoc(),
         drones:S.drones.filter(d=>d.path.length).map(d=>({id:d.fi+1,name:d.name,cells:d.path.length,route:d.path.map(c=>new GP(c.ll.lat,c.ll.lng)),alts:d.path.map(c=>+c.z.toFixed(1))})),terrain:g.terr};
       if(next)delete doc.createdAt;
       await ref.set(doc,{merge:true});   // 다음 회차: 같은 임무 문서에 회차·경로만 덮어씀
@@ -2283,11 +2338,10 @@ function fbWatchDetections(){
 async function cellPhotos(ci){
   const m=S.mission;
   if(m&&m.source==="sim")return (m.photoByCell.get(ci)||[]).map(p=>({...p,time:new Date(p.abs||m.started+p.t*1000),sim:true}));
+  if(viaBridge())return bridgePhotos(m,ci);
   if(!fb.db)throw{code:"nofb"};
   const mid=m?m.id:S.upload&&S.upload.mid;if(!mid)throw{code:"nomission"};
-  // 재촬영 비행 중: 지도는 잘게 나눈 칸이지만 드론은 원래 임무의 칸 번호로 사진을 올림 → 원래 칸으로 찾음
-  const rs=m&&m.reshootOf&&S.reshootCtx,g=rs?S.reshootCtx.plan:S.plan,qc=rs?(S.plan.cells[ci]||{}).pci:ci;
-  if(qc==null)return [];
+  const{g,qc}=photoCell(m,ci);if(qc==null)return [];
   const col=fb.db.collection("missions").doc(mid).collection("photos");
   const docsOf=q=>q.get().then(r=>r.docs.map(d=>({id:d.id,...d.data()})));
   let docs=await docsOf(col.where("cell","==",qc).limit(300));
@@ -2301,6 +2355,28 @@ async function cellPhotos(ci){
   if(m&&m.ended)out.forEach(p=>{if(p.time&&p.time>m.ended)p.reshoot=true});   // 임무가 끝난 뒤 찍힌 사진 = 재촬영
   return out.sort((a,b)=>(a.time||0)-(b.time||0));
 }
+/* 사진을 찾을 칸: 재촬영 비행 중에는 지도는 잘게 나눈 칸이지만 드론은 원래 임무의 칸 번호로 사진을 올림 → 원래 칸으로 찾음 */
+function photoCell(m,ci){
+  const rs=m&&m.reshootOf&&S.reshootCtx;
+  return rs?{g:S.reshootCtx.plan,qc:(S.plan.cells[ci]||{}).pci}:{g:S.plan,qc:ci};
+}
+/* 브리지(파이)에 이 칸 사진 목록을 물어봄. 칸 번호 없이 찍힌 사진은 위치로 거름 */
+async function bridgePhotos(m,ci){
+  const mid=m?m.id:S.upload&&S.upload.mid;if(!mid)throw{code:"nomission"};
+  const{g,qc}=photoCell(m,ci);if(qc==null)return [];
+  const ac=new AbortController(),tm=setTimeout(()=>ac.abort(),8000);
+  let list;
+  try{
+    const r=await fetch(`${bridgeHttp()}/photos?mission=${encodeURIComponent(mid)}&cell=${qc}${prefs.wsToken?"&t="+encodeURIComponent(prefs.wsToken):""}`,{signal:ac.signal,cache:"no-store"});
+    if(!r.ok)throw{code:"bridge",msg:`브리지 응답 ${r.status}`};list=await r.json();
+  }catch(e){throw e.code?e:{code:"bridge",msg:"드론(파이)의 Wi-Fi에 연결되어 있는지 확인하세요."}}finally{clearTimeout(tm)}
+  const c=g.cells[qc],la=c.poly.map(p=>p.lat),lo=c.poly.map(p=>p.lng);
+  const inCell=p=>p.cell===qc||(p.cell==null&&p.lat>=Math.min(...la)&&p.lat<=Math.max(...la)&&p.lng>=Math.min(...lo)&&p.lng<=Math.max(...lo));
+  const out=list.filter(inCell).map(p=>({id:p.uid,drone:p.drone,name:droneName(p.drone),lat:p.lat,lng:p.lng,alt:p.alt,hdg:p.hdg,tAvg:num(p.tempAvgC),
+    time:num(p.takenAt)?new Date(p.takenAt):null,src:p.thumb?bridgeFile(p.thumb):p.file?bridgeFile(p.file):null,full:p.file?bridgeFile(p.file):null}));
+  if(m&&m.ended)out.forEach(p=>{if(p.time&&p.time>m.ended)p.reshoot=true});
+  return out.sort((a,b)=>(a.time||0)-(b.time||0));
+}
 async function openCell(ci){
   const c=S.plan&&S.plan.cells[ci];if(!c)return;   // 영역이 없어진 뒤(출처 전환 등) 눌러도 안전
   const own=S.drones[c.owner];
@@ -2308,7 +2384,7 @@ async function openCell(ci){
   $("shTitle").textContent=cellName(ci);
   // 임무가 끝난 뒤: 이 칸만 다시 촬영
   const canRe=canReshoot();$("shFoot").hidden=!canRe;
-  if(canRe)$("shFoot").innerHTML=`<button class="btn pri wide" data-rspick="${ci}">이 칸 재촬영하기 (다른 칸도 고를 수 있음)</button>`;
+  if(canRe)$("shFoot").innerHTML=`<div class="row2"><button class="btn pri" data-reshoot="${ci}">재촬영</button><button class="btn" data-rspick="${ci}">추가 선택</button></div>`;
   const tv=cellTemp(ci);
   $("shSub").textContent=`${own?own.name+" 구역 · ":""}${c.visited?"탐색 완료":"탐지 있음"} · 평균 ${tv!=null?tv.toFixed(1)+"°C":"온도 –"} · ${c.ll.lat.toFixed(5)}, ${c.ll.lng.toFixed(5)}`;
   $("shBody").innerHTML=`<div class="empty">사진을 불러오는 중…</div>`;$("sheet").hidden=false;document.body.classList.add("sheet-open");
@@ -2316,7 +2392,7 @@ async function openCell(ci){
   try{list=await cellPhotos(ci)}catch(e){
     if(S.selCell!==ci)return;
     $("shBody").innerHTML=e.code==="nofb"?`<div class="empty">이 칸의 사진은 Firebase에 있습니다.<br>설정에서 Firebase에 연결해 주세요.</div><button class="btn pri wide" style="margin-top:12px" data-go="settings" data-pane="fb">Firebase 설정으로 이동</button>`
-      :`<div class="empty">사진을 불러오지 못했습니다.<br>${esc(e.code==="nomission"?"이 구역의 임무 ID가 없습니다. 경로를 업로드한 임무에서만 사진을 찾을 수 있습니다.":fbErr(e))}</div>`;
+      :`<div class="empty">사진을 불러오지 못했습니다.<br>${esc(e.code==="bridge"?e.msg:e.code==="nomission"?"이 구역의 임무 ID가 없습니다. 경로를 업로드한 임무에서만 사진을 찾을 수 있습니다.":fbErr(e))}</div>`;
     return;
   }
   if(S.selCell!==ci)return;
@@ -2364,16 +2440,13 @@ function rsStart(ci){
   S.rsPick=new Set(ci!=null&&ci>=0?[ci]:[]);rsUi();
 }
 function rsEnd(){if(!S.rsPick)return;S.rsPick=null;rsUi()}
-/* 재촬영 막대: 임무가 끝나면 지도 아래 가운데 한 곳에 계속 떠 있음. 오른쪽 버튼 자리는 고정 (칸 고르기 → 재촬영 시작) */
+/* 추가 선택 막대: 칸 창에서 ‘추가 선택’을 누르면 지도 아래 가운데에 뜸 (취소 | 재촬영 시작, 버튼 자리 고정) */
 function rsUi(){
-  const can=canReshoot();if(S.rsPick&&!can)S.rsPick=null;
-  const on=!!S.rsPick,n=on?S.rsPick.size:0,key=`${can}|${on}|${n}`;
+  if(S.rsPick&&!canReshoot())S.rsPick=null;
+  const on=!!S.rsPick,n=on?S.rsPick.size:0,key=`${on}|${n}`;
   if(key===S.rsKey)return;S.rsKey=key;
-  const mw=$("map").parentElement;$("rsBar").hidden=!can;mw.classList.toggle("rs-on",can);mw.classList.toggle("rs-pick",on);
-  $("rsTitle").textContent=on?"재촬영할 칸을 누르세요":"재촬영";
-  $("rsInfo").textContent=!on?"다시 찍을 칸을 지도에서 고를 수 있습니다":n?`${n}칸 고름 · ${rsPreview()}`:"칸을 눌러 고르세요 · 다시 누르면 빠짐";
-  $("rsCancel").style.visibility=on?"visible":"hidden";
-  $("rsGo").textContent=on?"재촬영 시작":"칸 고르기";$("rsGo").disabled=on&&!n;
+  const mw=$("map").parentElement;$("rsBar").hidden=!on;mw.classList.toggle("rs-on",on);
+  if(on){$("rsInfo").textContent=n?`${n}칸 고름 · ${rsPreview()}`:"칸을 눌러 고르세요 · 다시 누르면 빠짐";$("rsGo").disabled=!n}
   map.invalidate();
 }
 /* 고른 칸으로 미리 계산: 드론 몇 대 · 몇 분 (한 번 비행으로 안 되면 알려 줌) */
@@ -2385,7 +2458,7 @@ function rsPreview(){
   return `드론 ${used}대 · 약 ${Math.ceil(Math.max(...g.costs)/spec.speed/60)}분`;
 }
 $("rsCancel").onclick=rsEnd;
-$("rsGo").onclick=()=>{if(!S.rsPick)rsStart(null);else if(S.rsPick.size)reshootCells([...S.rsPick])};
+$("rsGo").onclick=()=>{if(S.rsPick&&S.rsPick.size)reshootCells([...S.rsPick])};
 /* 재촬영 전 화면(원래 임무·칸·출발지)으로 되돌림 */
 function restoreAfterReshoot(){
   const x=S.reshootCtx;if(!x)return null;
@@ -2907,7 +2980,8 @@ function updateButtons(){
   const between=isBetween();
   $("btnReset").disabled=!run;$("btnReset").textContent=run&&m.ending?"기록만 종료":"임무 종료";
   $("btnRtl").hidden=!live;$("btnRtl").disabled=!run;
-  rsUi();   // 지도 아래 재촬영 막대 (임무가 끝난 뒤에만)
+  rsUi();   // 임무가 다시 열리면 추가 선택 막대 닫힘
+  const rsd=S.plan&&S.plan.cells.some(c=>c.reshot)?"":"none";if($("lgReshot").style.display!==rsd)$("lgReshot").style.display=rsd;   // 범례 ‘재촬영한 칸’은 재촬영한 칸이 있을 때만
   const lock=run||between||u==="wait";   // 비행 중·회차 사이·업로드 중에는 구역을 바꾸지 못함
   ["btnLocate","btnPick","modeAuto","modeDraw","dMinus","dPlus"].forEach(id=>$(id).disabled=lock);
   $("dMin").disabled=lock||S.mode!=="draw"||!S.drawRect;
@@ -3206,7 +3280,7 @@ const SET_ITEMS=[
   {g:"화면 · 기기",items:[["display","글자 크기","#0ea5e9"],["diag","위치 진단","#8b5cf6"]]}];
 function setSummary(k){   // 목록에 한 줄로 보이는 지금 상태 → [글, 색 구분]
   switch(k){
-    case "tele":return prefs.source!=="live"?["시뮬레이션 (드론 연결 안 함)",""]:[`${prefs.link==="fb"?"Firebase":"브리지"} · ${tele.state==="ok"?"연결됨":tele.state==="wait"?"연결 중":"연결 안 됨"}`,tele.state==="ok"?"good":tele.state==="bad"?"bad":""];
+    case "tele":return prefs.source!=="live"?["시뮬레이션 (드론 연결 안 함)",""]:[`${linkName()} · ${tele.state==="ok"?"연결됨":tele.state==="wait"?"연결 중":"연결 안 됨"}`,tele.state==="ok"?"good":tele.state==="bad"?"bad":""];
     case "fb":return[fb.msg||"연결 안 됨",fb.state==="ok"?"good":fb.state==="bad"?"bad":""];
     case "air":return!prefs.airKey?["인증키를 넣으면 공식 구역을 자동으로 받습니다",""]:[`${prefs.airOn?"표시 켜짐":"표시 꺼짐"} · 받은 구역 ${AIR.zones.length}곳 · 승인서 ${Object.keys(APPR.map).length}건`,AIR.msg.startsWith("받지 못함")?"bad":""];
     case "thermal":return[`탐지 ${prefs.thermalMin}°C 이상 · 고온 열원 ${prefs.fireC}°C 이상${prefs.vibe?" · 진동 켜짐":""}`,""];
@@ -3306,7 +3380,8 @@ document.addEventListener("click",e=>{
   if(t.dataset.del){dropSaved(t.dataset.del);if(S.recSel===t.dataset.del)S.recSel=null;history=history.filter(h=>String(h.id)!==t.dataset.del);store.set("history",history);renderMission()}
   if(t.dataset.route)openRoutes(t.dataset.route);
   if(t.dataset.load)loadRecord(t.dataset.load);
-  if(t.dataset.rspick!=null)rsStart(+t.dataset.rspick);
+  if(t.dataset.reshoot!=null)reshootCells([+t.dataset.reshoot]);   // 이 칸만 바로
+  if(t.dataset.rspick!=null)rsStart(+t.dataset.rspick);            // 이 칸을 고른 채로 다른 칸도 고르기
   const id=+(t.dataset.see||t.dataset.ok||t.dataset.no||0);
   if(id&&S.mission){
     const d=detOf(id);if(!d)return;
@@ -3461,7 +3536,13 @@ $("sAirDomain").onchange=e=>{prefs.airDomain=e.target.value.trim();saveAll();AIR
 $("sAirOn").onchange=e=>{prefs.airOn=e.target.checked;saveAll();AIR.ver++;renderSide();map.invalidate();if(prefs.airOn)airLoad()};
 $("btnAirGet").onclick=()=>airLoad(true);
 $("btnAirClr").onclick=()=>ask("받은 구역 지우기","받아 둔 공식 비행금지구역을 지웁니다. 등록한 승인서는 남습니다.",()=>{AIR.zones=[];AIR.boxes=[];AIR.ver++;AIR.msg="";store.del("airZones");store.del("airBoxes");airUi();renderSide();map.invalidate()});
-function linkUi(){const fbl=prefs.link==="fb";$("lbWsUrl").hidden=fbl;$("lbWsToken").hidden=fbl;$("fbLinkNote").hidden=!fbl;$("wsLinkNote").hidden=fbl}
+function linkUi(){
+  const fbl=prefs.link==="fb",usb=prefs.link==="usb";
+  $("lbWsUrl").hidden=fbl;$("lbWsToken").hidden=fbl;$("lbBaud").hidden=!usb;$("fbLinkNote").hidden=!fbl;$("wsLinkNote").hidden=fbl||usb;$("usbLinkNote").hidden=!usb;
+  $("tWsUrl").textContent=usb?"파이 Wi-Fi 주소 (사진 받기, 선택)":"브리지 주소";$("tWsToken").textContent=usb?"파이 브리지 비밀번호":"브리지 비밀번호";
+  $("sBaud").value=String(prefs.baud||57600);
+}
+$("sBaud").onchange=e=>{prefs.baud=+e.target.value;saveAll();if(prefs.source==="live"&&prefs.link==="usb")teleConnect()};
 $("sLink").onchange=e=>{if(isOpen()){e.target.value=prefs.link;return toast("임무 중에는 연결 방식을 바꿀 수 없습니다.")}prefs.link=e.target.value;saveAll();linkUi();if(prefs.source==="live")teleConnect()};
 $("btnTele").onclick=()=>{prefs.wsUrl=$("sWsUrl").value.trim();prefs.wsToken=$("sWsToken").value;saveAll();if(prefs.source!=="live"){$("sSource").value="live";setSource("live")}else teleConnect()};
 $("btnFb").onclick=()=>{prefs.fbConfig=$("sFbCfg").value.trim();prefs.fbEmail=$("sFbEmail").value.trim();saveAll();const pw=$("sFbPw").value;$("sFbPw").value="";fbConnect(prefs.fbEmail,pw)};

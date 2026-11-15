@@ -26,6 +26,26 @@
      파이의 사진 촬영은 PX4가 보내는 CAMERA_TRIGGER 메시지에 맞춰 찍게 하세요.
        PX4 파라미터:  TRIG_INTERFACE = MAVLink,  TRIG_MODE = Distance (on command)
 
+  4) 인터넷 없이 Wi-Fi로 (드론 1대, 파이에서 브리지 실행) — 사진·탐지도 Wi-Fi로 앱에 바로 보냄
+       파이에서 (픽스호크 시리얼 하나를 브리지와 촬영 프로그램이 같이 쓰도록 mavlink-router로 나눔):
+         mavlink-routerd -e 127.0.0.1:14550 -e 127.0.0.1:14540 /dev/serial0:921600
+         python3 gcs_bridge.py --mav udpin:127.0.0.1:14550 --local /home/pi/drone-data/local --token 비밀번호
+         python3 pi_drone.py --config config.json --local /home/pi/drone-data/local --mav udpin:127.0.0.1:14540
+       파이 핫스팟:  sudo nmcli device wifi hotspot ssid DRONE1 password 8자이상비밀번호   (파이 주소 10.42.0.1)
+       태블릿:    파이 핫스팟 Wi-Fi에 연결 → 앱 설정 → 연결 방식 '브리지' → 주소 ws://<파이 IP>:8766 (핫스팟이면 보통 ws://10.42.0.1:8766)
+     사진 폴더 약속 (--local 폴더 = L)
+       브리지 → 촬영 프로그램: L/mission.json  {"mission","grid","reshoot","drones":{"1":{"shot","cam","route","alt",...}}} (경로 업로드 때마다 새로 씀)
+       촬영 프로그램 → 브리지: L/out/<임무>/photos.jsonl, detections.jsonl 에 한 줄씩 추가 (JSON 한 줄 = 사진/탐지 하나)
+         사진  {"id","drone","lat","lng","alt","hdg","takenAt"(ms),"cell","tempAvgC","thumb","file","thermal"}
+         탐지  {"id","drone","lat","lng","alt","tempC","takenAt"(ms),"cell","img"}
+         thumb·file·thermal·img = L/out 아래 사진 파일 경로 (예: "M123/1/thumb/0001.jpg")
+       앱은 사진 목록을 http://<파이 IP>:8766/photos?mission=&cell= 로, 사진은 /files/<경로> 로 받음 (비밀번호는 t=)
+
+  5) 텔레메트리 무선기: 노트북에 꽂으면 --mav /dev/ttyUSB0,57600 (윈도우 COM3,57600).
+     태블릿에 바로 꽂으면 브리지 없이 앱이 직접 통신 (앱 설정 → 연결 방식 '텔레메트리 무선기', web/mavlink-usb.js)
+     라즈베리파이의 탐지 알림은 STATUSTEXT "DET <번호> <위도> <경도> <온도>" 로 무선기를 거쳐 옴 → 앱에 탐지로 보냄
+     (PX4: 파이가 연결된 포트의 MAV_x_FORWARD = 1)
+
   3) 앱 연결: 설정 → 드론 실시간 위치 → '실시간' → 브리지 주소 → 연결
      비밀번호: 브리지를 --token 비밀번호 로 켜고(또는 환경 변수 GCS_BRIDGE_TOKEN), 앱의 '브리지 비밀번호'에 같은 값을 넣습니다.
        비밀번호가 맞아야 드론 위치를 받고 명령을 보낼 수 있습니다. 비밀번호 없이 켜면 같은 네트워크의 누구나 접속할 수 있습니다.
@@ -57,7 +77,8 @@
 메시지 형식 (JSON)
   드론→앱 {"type":"telemetry","id":1,"lat":..,"lng":..,"alt":상대고도m,"bat":%,"hdg":도,"spd":m/s,"mode":"MISSION","armed":true,"ts":기체시각(초)}
           {"type":"status","id":1,"text":"Preflight Fail: ...","sev":3}
-          {"type":"detection","id":1,"lat":..,"lng":..,"alt":..,"temp":36.4,"uid":"..."}   (열화상 탐지를 브리지로 보낼 때, 보통은 Firebase로 올림)
+          {"type":"detection","id":1,"lat":..,"lng":..,"alt":..,"temp":36.4,"uid":"...","mission":"M..","img":"사진 경로"}   (--local: 파이의 탐지)
+          {"type":"photo","id":1,"uid":"...","mission":"M..","lat":..,"lng":..,"cell":12,"tempAvgC":18.2,"takenAt":ms}   (--local: 칸 평균 온도용)
   앱→드론 {"type":"upload","mission":"M..","drones":[{"id":1,"home":[lat,lng],"alt":100,"speed":8,"shot":39.1,
                    "takeoff":120.5,"cam":[1,40],"route":[[lat,lng,상대고도m],..]}]}
           (alt = 땅에서 비행 고도 설정값, takeoff = 이륙 고도, cam = 촬영 시작·끝 웨이포인트 번호. route 점에 고도가 없으면 alt, takeoff·cam이 없으면 예전 방식)
@@ -66,7 +87,7 @@
 
 외부 패키지 없이 동작합니다 (실기체 연결에만 pymavlink 필요).
 """
-import argparse, asyncio, base64, hashlib, hmac, json, math, os, queue, random, ssl, struct, sys, threading, time
+import argparse, asyncio, base64, hashlib, hmac, json, math, os, queue, random, re, ssl, struct, sys, threading, time
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 LIMITS = {"alt": (5, 150), "speed": (1, 15), "points": 600, "radius": 5000, "rel": (-300, 600)}
@@ -75,7 +96,8 @@ lock = threading.Lock()
 state = {}        # id -> 최신 텔레메트리
 events = []       # 한 번만 보낼 메시지 (ack, 탐지)
 clients = set()
-vehicles = {}     # sysid -> {"conn", "autopilot", "armed"}
+vehicles = {}     # sysid -> {"conn", "autopilot", "armed", "comp", "seen"}
+STALE_S = 3.0     # 기체 신호가 이만큼 없으면 앱에 위치를 더 보내지 않음 → 앱이 '신호 없음'으로 표시
 jobs = {}         # 연결 -> 작업 큐
 demo = None       # 데모 모드 상태
 TOKEN = ""        # 접속 비밀번호 (--token 또는 환경 변수 GCS_BRIDGE_TOKEN). 비어 있으면 누구나 접속
@@ -142,6 +164,10 @@ async def ws_reader(reader, writer, peer):
                         clients.add(writer)
                         print(f"[앱 연결] {peer} (현재 {len(clients)}개)")
                     await send_one(writer, {"type": "auth", "ok": True})
+                    if LOCAL:   # 연결이 끊긴 동안 생긴 탐지·사진 (앱이 같은 것은 거름)
+                        backlog = local_backlog()
+                        if backlog:
+                            await send_one(writer, backlog)
                 elif not authed:
                     if TOKEN:
                         await send_one(writer, {"type": "auth", "ok": False, "msg": "브리지 비밀번호가 필요합니다"})
@@ -165,6 +191,10 @@ async def handle(reader, writer):
                 k, v = line.split(":", 1)
                 headers[k.strip().lower()] = v.strip()
         key = headers.get("sec-websocket-key")
+        target = req.decode("latin-1").split("\r\n", 1)[0].split(" ")
+        if not key and LOCAL and len(target) > 1 and target[1].startswith(("/photos", "/detections", "/files/")):
+            await local_http(writer, target[1])
+            return
         if not key:  # 브라우저로 주소를 직접 연 경우 (인증서 허용용)
             body = "드론 수색 GCS 브리지가 실행 중입니다. 이제 앱에서 이 주소로 연결하세요.".encode("utf-8")
             writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: "
@@ -192,7 +222,8 @@ async def broadcaster(interval):
     while True:
         await asyncio.sleep(interval)
         with lock:
-            msgs = events[:] + [dict(v) for v in state.values()]   # 이벤트(지나간 웨이포인트 위치 등)가 현재 위치보다 먼저
+            now = time.time()   # 이벤트(지나간 웨이포인트 위치 등)가 현재 위치보다 먼저. 신호가 끊긴 기체는 마지막 위치를 되풀이해 보내지 않음
+            msgs = events[:] + [{k: x for k, x in v.items() if k != "_seen"} for v in state.values() if now - v.get("_seen", 0) < STALE_S]
             events.clear()
         if not msgs or not clients:
             continue
@@ -203,6 +234,144 @@ async def broadcaster(interval):
                 await w.drain()
             except Exception:
                 clients.discard(w)
+
+
+# ======================= Wi-Fi 사진 허브 (--local, 파이에서 실행) =======================
+LOCAL = None          # 사진 폴더. 촬영 프로그램이 out/<임무>/photos.jsonl·detections.jsonl과 사진 파일을 씀
+local_photos = {}     # 임무 -> [사진]
+local_dets = {}       # 임무 -> [탐지 메시지]
+local_seen = set()
+local_mission = {"id": None}
+CTYPE = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".json": "application/json"}
+
+
+def local_write_mission(m):
+    """앱이 경로를 올리면 촬영 프로그램이 볼 임무 정보(임무 번호·칸 격자·촬영 간격·경로)를 씀"""
+    doc = {"mission": m.get("mission"), "grid": m.get("grid"), "reshoot": bool(m.get("reshoot")), "at": time.time(),
+           "drones": {str(int(d.get("id", 0))): {k: d.get(k) for k in ("home", "alt", "speed", "shot", "takeoff", "cam", "route")}
+                      for d in m.get("drones", [])}}
+    os.makedirs(LOCAL, exist_ok=True)
+    tmp = os.path.join(LOCAL, "mission.json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(doc, f, ensure_ascii=False)
+    os.replace(tmp, os.path.join(LOCAL, "mission.json"))   # 촬영 프로그램이 반쯤 쓴 파일을 읽지 않게
+    local_mission["id"] = doc["mission"]
+    print(f"[사진] 임무 {doc['mission']} 정보를 촬영 프로그램에 넘김 ({LOCAL}/mission.json)")
+
+
+def local_line(mid, kind, v):
+    uid = str(v.get("id") or "")
+    key = (mid, kind, uid)
+    if not uid or key in local_seen:
+        return None
+    try:
+        drone = int(v.get("drone"))
+        lat, lng = float(v["lat"]), float(v["lng"])
+    except Exception:
+        return None
+    local_seen.add(key)
+    cell = v.get("cell") if isinstance(v.get("cell"), int) else None
+    if kind == "photos":
+        p = {"uid": uid, "drone": drone, "lat": lat, "lng": lng, "alt": v.get("alt"), "hdg": v.get("hdg"), "takenAt": v.get("takenAt"),
+             "cell": cell, "tempAvgC": v.get("tempAvgC"), "thumb": v.get("thumb"), "file": v.get("file"), "thermal": v.get("thermal")}
+        local_photos.setdefault(mid, []).append(p)
+        return {"type": "photo", "id": drone, "uid": uid, "mission": mid, "lat": lat, "lng": lng, "cell": cell,
+                "tempAvgC": v.get("tempAvgC"), "takenAt": v.get("takenAt")}
+    d = {"type": "detection", "id": drone, "uid": "L" + uid, "mission": mid, "lat": lat, "lng": lng, "alt": v.get("alt"),
+         "temp": v.get("tempC", v.get("temp")), "takenAt": v.get("takenAt"), "img": v.get("img")}
+    local_dets.setdefault(mid, []).append(d)
+    return d
+
+
+def local_tail():
+    """촬영 프로그램이 jsonl에 새 줄을 쓰면 앱으로 보냄 (1초마다 확인, 끝까지 쓴 줄만)"""
+    offs = {}
+    while True:
+        out = os.path.join(LOCAL, "out")
+        try:
+            mids = [d for d in os.listdir(out) if os.path.isdir(os.path.join(out, d))]
+        except FileNotFoundError:
+            mids = []
+        for mid in mids:
+            for kind in ("detections", "photos"):        # 탐지 먼저
+                p = os.path.join(out, mid, kind + ".jsonl")
+                try:
+                    size = os.path.getsize(p)
+                except OSError:
+                    continue
+                o = offs.get(p, 0)
+                if size < o:
+                    o = 0                                 # 파일을 새로 만든 경우
+                if size == o:
+                    continue
+                with open(p, "rb") as f:
+                    f.seek(o)
+                    data = f.read(size - o)
+                cut = data.rfind(b"\n") + 1
+                offs[p] = o + cut
+                msgs = []
+                with lock:
+                    for line in data[:cut].splitlines():
+                        try:
+                            m = local_line(mid, kind, json.loads(line))
+                        except Exception:
+                            m = None
+                        if m:
+                            msgs.append(m)
+                    events.extend(msgs)
+                    n = sum(1 for m in msgs if m["type"] == "detection")
+                    if n:
+                        print(f"[사진] 임무 {mid}: 탐지 {n}건")
+        time.sleep(1)
+
+
+def local_backlog():
+    mid = local_mission["id"]
+    if not mid:
+        return None
+    with lock:
+        dets = list(local_dets.get(mid, []))
+        phs = [{"type": "photo", "id": p["drone"], "uid": p["uid"], "mission": mid, "lat": p["lat"], "lng": p["lng"], "cell": p["cell"],
+                "tempAvgC": p["tempAvgC"], "takenAt": p["takenAt"]} for p in local_photos.get(mid, [])]
+    return dets + phs or None
+
+
+async def local_http(writer, target):
+    """/photos?mission=&cell= → 사진 목록(JSON), /files/<경로> → 사진 파일. 비밀번호는 t="""
+    from urllib.parse import urlsplit, parse_qs, unquote
+    u = urlsplit(target)
+    q = {k: v[0] for k, v in parse_qs(u.query).items()}
+
+    def reply(code, body, ctype="application/json; charset=utf-8", extra=""):
+        head = (f"HTTP/1.1 {code}\r\nContent-Type: {ctype}\r\nContent-Length: {len(body)}\r\n"
+                f"Access-Control-Allow-Origin: *\r\n{extra}Connection: close\r\n\r\n")
+        writer.write(head.encode() + body)
+
+    if TOKEN and not hmac.compare_digest(q.get("t", "").encode(), TOKEN.encode()):
+        reply("403 Forbidden", b'{"error":"token"}')
+    elif u.path == "/detections":   # 무선기 방식: 무선기로 먼저 받은 탐지에 사진을 붙일 때
+        with lock:
+            lst = list(local_dets.get(q.get("mission", ""), []))
+        reply("200 OK", json.dumps(lst, ensure_ascii=False).encode("utf-8"), extra="Cache-Control: no-store\r\n")
+    elif u.path == "/photos":
+        mid = q.get("mission", "")
+        try:
+            cell = int(q["cell"]) if "cell" in q else None
+        except ValueError:
+            cell = None
+        with lock:
+            lst = [p for p in local_photos.get(mid, []) if cell is None or p["cell"] in (cell, None)]
+        reply("200 OK", json.dumps(lst, ensure_ascii=False).encode("utf-8"), extra="Cache-Control: no-store\r\n")
+    else:
+        root = os.path.realpath(os.path.join(LOCAL, "out"))
+        path = os.path.realpath(os.path.join(root, unquote(u.path[len("/files/"):])))
+        if not path.startswith(root + os.sep) or not os.path.isfile(path):   # 폴더 밖(../) 접근 막음
+            reply("404 Not Found", b'{"error":"not found"}')
+        else:
+            with open(path, "rb") as f:
+                data = f.read()
+            reply("200 OK", data, CTYPE.get(os.path.splitext(path)[1].lower(), "application/octet-stream"), "Cache-Control: max-age=86400\r\n")
+    await writer.drain()
 
 
 # ======================= 앱 명령 처리 =======================
@@ -250,6 +419,8 @@ def on_app_message(m):
     op = m.get("type")
     if op == "upload":
         print(f"[upload] 임무 {m.get('mission')} · 드론 {len(m.get('drones', []))}기")
+        if LOCAL:
+            local_write_mission(m)
         for d in m.get("drones", []):
             sid = int(d.get("id", 0))
             err = check_route(d)
@@ -272,6 +443,8 @@ def dispatch(sid, job):
     v = vehicles.get(sid)
     if not v:
         return ack(job[0], sid, False, "이 번호(SYSID)의 기체 신호가 없습니다")
+    if time.time() - v.get("seen", 0) > STALE_S:
+        return ack(job[0], sid, False, f"기체 신호가 끊겼습니다 ({time.time() - v.get('seen', 0):.0f}초째 하트비트 없음)")
     jobs[v["conn"]].put((sid, job))
 
 
@@ -286,6 +459,22 @@ MAV_RESULT = {1: "일시 거부", 2: "거부", 3: "지원 안 함", 4: "실패",
 MISSION_RESULT = {1: "오류", 2: "지원 안 하는 프레임", 3: "지원 안 하는 명령", 4: "저장 공간 부족(SD카드 확인)",
                   5: "잘못된 값", 13: "순서 오류", 15: "거부됨"}
 NAN = float("nan")                   # PX4: 방향(yaw) NaN = 현재 방향 유지
+DET_RE = re.compile(r"^DET\s+(\S+)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)")   # "DET <번호> <위도> <경도> <온도>"
+MAV_AUTOPILOT_INVALID = 8            # 비행 제어기가 아닌 장치(카메라·짐벌·라즈베리파이 등)의 하트비트
+last_hb = {}                         # 연결 -> 마지막 GCS 하트비트 시각
+
+
+def gcs_heartbeat(conn):
+    """1초마다 GCS 하트비트. 업로드처럼 오래 걸리는 작업 중에도 보내야 PX4가 '지상국 끊김'으로 판단하지 않음"""
+    now = time.time()
+    if now - last_hb.get(conn, 0) >= 1:
+        conn.mav.heartbeat_send(MAV_TYPE_GCS, MAV_AUTOPILOT_INVALID, 0, 0, 0)
+        last_hb[conn] = now
+
+
+def for_us(msg):
+    """QGC 등 다른 지상국에 보낸 응답(임무 요청·명령 응답)은 무시. target_system이 없거나 0이면 우리 것으로 봄"""
+    return getattr(msg, "target_system", 0) in (0, GCS_SYSID)
 
 
 def tel(sid):
@@ -305,18 +494,22 @@ def handle_msg(conn, msg, mavutil):
     t = msg.get_type()
     with lock:
         if t == "HEARTBEAT":
-            if msg.type == MAV_TYPE_GCS:
+            # 지상국, 그리고 같은 기체 번호를 쓰는 카메라·짐벌·라즈베리파이 하트비트는 무시
+            # (이걸 비행 제어기로 알면 'PX4 기체가 아닙니다'로 명령이 거부되고 모드·시동 표시가 흔들림)
+            if msg.type == MAV_TYPE_GCS or msg.autopilot == MAV_AUTOPILOT_INVALID:
                 return
             armed = bool(msg.base_mode & 128)
-            vehicles[sid] = {"conn": conn, "autopilot": msg.autopilot, "armed": armed}
+            vehicles[sid] = {"conn": conn, "autopilot": msg.autopilot, "armed": armed, "comp": msg.get_srcComponent(), "seen": time.time()}
             d = tel(sid)
             d["armed"] = armed
+            d["_seen"] = time.time()
             try:
                 d["mode"] = mavutil.mode_string_v10(msg)
             except Exception:
                 pass
         elif t == "GLOBAL_POSITION_INT":
             d = tel(sid)
+            d["_seen"] = time.time()
             d.update(lat=msg.lat / 1e7, lng=msg.lon / 1e7, alt=round(msg.relative_alt / 1000, 1),
                      spd=round(math.hypot(msg.vx, msg.vy) / 100, 1), ts=msg.time_boot_ms / 1000)
             if msg.hdg != 65535:
@@ -325,18 +518,25 @@ def handle_msg(conn, msg, mavutil):
             tel(sid)["bat"] = msg.battery_remaining
         elif t == "STATUSTEXT":    # 사전 점검 실패 등 PX4 안내 문구
             text = msg.text.decode("utf-8", "replace") if isinstance(msg.text, bytes) else str(msg.text)
-            events.append({"type": "status", "id": sid, "text": text.strip("\0 ").strip(), "sev": msg.severity})
+            text = text.strip("\0 ").strip()
+            det = DET_RE.match(text)   # 라즈베리파이의 탐지 알림 (픽스호크를 거쳐 무선기로 옴)
+            if det:
+                events.append({"type": "detection", "id": sid, "uid": "L" + det.group(1), "lat": float(det.group(2)), "lng": float(det.group(3)),
+                               "temp": float(det.group(4)), "alt": state.get(sid, {}).get("alt")})
+            else:
+                events.append({"type": "status", "id": sid, "text": text, "sev": msg.severity})
 
 
 def wait_for(conn, sid, types, mavutil, pred=None, timeout=4.0):
     """원하는 메시지가 올 때까지 기다리면서 그 사이 텔레메트리도 계속 갱신"""
     end = time.time() + timeout
     while time.time() < end:
+        gcs_heartbeat(conn)
         msg = conn.recv_match(blocking=True, timeout=0.3)
         if msg is None:
             continue
         handle_msg(conn, msg, mavutil)
-        if msg.get_type() in types and msg.get_srcSystem() == sid and (pred is None or pred(msg)):
+        if msg.get_type() in types and msg.get_srcSystem() == sid and for_us(msg) and (pred is None or pred(msg)):
             return msg
     return None
 
@@ -357,11 +557,15 @@ def build_items(d):
     return items
 
 
+def comp_of(sid):
+    return vehicles.get(sid, {}).get("comp", 1)   # 비행 제어기 컴포넌트 (PX4는 보통 1)
+
+
 def job_upload(conn, sid, d, mavutil):
     items = build_items(d)
-    n = len(items)
+    n, comp = len(items), comp_of(sid)
     for attempt in range(3):
-        conn.mav.mission_count_send(sid, 1, n, 0)
+        conn.mav.mission_count_send(sid, comp, n, 0)
         sent = set()
         while True:
             msg = wait_for(conn, sid, ("MISSION_REQUEST_INT", "MISSION_REQUEST", "MISSION_ACK"), mavutil, timeout=3)
@@ -378,10 +582,10 @@ def job_upload(conn, sid, d, mavutil):
                 continue
             fr, cmd, p1, p2, p3, p4, la, lo, al = items[seq]
             if msg.get_type() == "MISSION_REQUEST_INT":   # 요청한 형식 그대로 답함
-                conn.mav.mission_item_int_send(sid, 1, seq, fr, cmd, 0, 1, p1, p2, p3, p4,
+                conn.mav.mission_item_int_send(sid, comp, seq, fr, cmd, 0, 1, p1, p2, p3, p4,
                                                int(round(la * 1e7)), int(round(lo * 1e7)), al, 0)
             else:
-                conn.mav.mission_item_send(sid, 1, seq, fr, cmd, 0, 1, p1, p2, p3, p4, la, lo, al, 0)
+                conn.mav.mission_item_send(sid, comp, seq, fr, cmd, 0, 1, p1, p2, p3, p4, la, lo, al, 0)
             sent.add(seq)
         print(f"[upload] 드론 {sid}: 응답 없음, 재시도 {attempt + 1}/3")
     return False, "기체 응답 없음 (3회 시도)"
@@ -389,7 +593,7 @@ def job_upload(conn, sid, d, mavutil):
 
 def command(conn, sid, cmd, mavutil, *p):
     p = list(p) + [0] * (7 - len(p))
-    conn.mav.command_long_send(sid, 1, cmd, 0, *p)
+    conn.mav.command_long_send(sid, comp_of(sid), cmd, 0, *p)
     a = wait_for(conn, sid, ("COMMAND_ACK",), mavutil, pred=lambda x: x.command == cmd, timeout=4)
     if a is None:
         return False, "응답 없음"
@@ -423,6 +627,7 @@ JOBS = {"upload": lambda c, s, d, mu: job_upload(c, s, d, mu),
 
 
 def mav_worker(conn_str):
+    os.environ.setdefault("MAVLINK20", "1")   # PX4는 MAVLink 2 (임무 종류·명령 응답 대상 같은 확장 필드가 v1에서는 빠짐)
     try:
         from pymavlink import mavutil
     except ImportError:
@@ -435,11 +640,8 @@ def mav_worker(conn_str):
         conn = mavutil.mavlink_connection(conn_str, **kw)
     jobs[conn] = queue.Queue()
     print(f"[MAVLink] {conn_str} 수신 대기")
-    last_hb = 0
     while True:
-        if time.time() - last_hb > 1:   # GCS 하트비트 (PX4 데이터 링크 끊김 페일세이프 판단에 쓰임)
-            conn.mav.heartbeat_send(MAV_TYPE_GCS, 8, 0, 0, 0)
-            last_hb = time.time()
+        gcs_heartbeat(conn)   # PX4 데이터 링크 끊김 페일세이프 판단에 쓰임
         try:
             sid, (op, data) = jobs[conn].get_nowait()
             if vehicles.get(sid, {}).get("autopilot") != MAV_AUTOPILOT_PX4:
@@ -507,7 +709,7 @@ def demo_worker(n, accel):
             mlng = m_per_lng(la)
             for k, v in demo["drones"].items():
                 tel = {"type": "telemetry", "id": k, "lat": la, "lng": lo, "alt": 0.0, "bat": 100.0, "hdg": 0.0,
-                       "spd": 0, "mode": "STANDBY", "armed": False, "ts": round(now * accel, 2)}
+                       "spd": 0, "mode": "STANDBY", "armed": False, "ts": round(now * accel, 2), "_seen": now}
                 if v.get("route") and v.get("t0") is not None:
                     # 실제 PX4처럼: 제자리 수직 이륙 → 점마다 정해진 고도로 경로 비행(고도가 바뀌면 상승 3m/s·하강 1.5m/s)
                     # → 출발지 위에서 수직 착륙. 구간 시간 = 수평·수직 중 오래 걸리는 쪽
@@ -568,11 +770,22 @@ async def main():
     ap.add_argument("--rate", type=float, default=2, help="앱으로 보내는 횟수(초당)")
     ap.add_argument("--token", default=os.environ.get("GCS_BRIDGE_TOKEN", ""),
                     help="앱 접속 비밀번호 (앱 설정 → 브리지 비밀번호에 같은 값). 환경 변수 GCS_BRIDGE_TOKEN으로도 지정")
+    ap.add_argument("--local", help="사진 폴더: 인터넷 없이 Wi-Fi로 쓸 때 (파이에서 실행). 촬영 프로그램과 같은 폴더")
     ap.add_argument("--cert")
     ap.add_argument("--key")
     a = ap.parse_args()
-    global TOKEN
+    global TOKEN, LOCAL
     TOKEN = a.token
+    if a.local:
+        LOCAL = os.path.abspath(a.local)
+        os.makedirs(os.path.join(LOCAL, "out"), exist_ok=True)
+        try:
+            with open(os.path.join(LOCAL, "mission.json"), encoding="utf-8") as f:
+                local_mission["id"] = json.load(f).get("mission")   # 브리지를 다시 켜도 지금 임무를 이어서
+        except Exception:
+            pass
+        threading.Thread(target=local_tail, daemon=True).start()
+        print(f"[사진] Wi-Fi 사진 허브: {LOCAL}")
     if a.demo == bool(a.mav):
         ap.error("--demo 또는 --mav 중 하나만 지정하세요.")
     if a.demo:
