@@ -44,10 +44,10 @@
   5) 텔레메트리 무선기: 노트북에 꽂으면 --mav /dev/ttyUSB0,57600 (윈도우 COM3,57600).
      태블릿에 바로 꽂으면 브리지 없이 앱이 직접 통신 (앱 설정 → 연결 방식 '텔레메트리 무선기', web/mavlink-usb.js)
      라즈베리파이의 탐지 알림은 STATUSTEXT "DET <번호> <위도> <경도> <온도>" 로 무선기를 거쳐 옴 → 앱에 탐지로 보냄
-     (PX4: 파이가 연결된 포트의 MAV_x_FORWARD = 1)
+     (PX4: 무선기 포트·파이 포트 모두 MAV_0_FORWARD = 1, MAV_1_FORWARD = 1)
 
   6) 노트북 브리지 (드론 ─ 텔레메트리 무선기 ─ 노트북 ─ Wi-Fi ─ 태블릿 앱)
-       python gcs_bridge.py --mav COM3,57600 --pi http://10.14.61.56:8080 --qgc udpout:127.0.0.1:14550 --token 비밀번호
+       python gcs_bridge.py --mav COM3,57600 --pi http://dmdpi.local:8080 --qgc udpout:127.0.0.1:14550 --token 비밀번호
        --pi  : 파이 촬영 프로그램(pi_camera.py). 경로를 올릴 때 임무 정보를 보내고, 파이 Wi-Fi가 닿으면(이륙 전·착륙 뒤) 사진·탐지를 받아 옴
                비행 중 탐지 알림은 무선기(STATUSTEXT "DET ...")로 바로 옴
        --qgc : 같은 무선기를 노트북 QGroundControl에서도 보기 (QGC는 UDP 14550 자동 연결)
@@ -169,7 +169,8 @@ async def ws_reader(reader, writer, peer):
                         authed = True
                         clients.add(writer)
                         print(f"[앱 연결] {peer} (현재 {len(clients)}개)")
-                    await send_one(writer, {"type": "auth", "ok": True, "pi": PI})   # pi: 앱이 드론 영상(<pi>/video)을 바로 볼 주소
+                    pi = await asyncio.get_running_loop().run_in_executor(None, pi_base) if PI else None
+                    await send_one(writer, {"type": "auth", "ok": True, "pi": pi})   # pi: 앱이 드론 영상(<pi>/video)을 바로 볼 주소
                     if LOCAL or PI:   # 연결이 끊긴 동안 생긴 탐지·사진 (앱이 같은 것은 거름)
                         backlog = local_backlog()
                         if backlog:
@@ -338,15 +339,34 @@ def local_tail():
 
 # ----- 노트북 브리지 방식 (--pi): 드론은 텔레메트리 무선기로, 사진은 파이 Wi-Fi가 닿을 때 파이의 pi_camera.py에서 -----
 QGC_URL = None
-PI = None          # 파이 촬영 프로그램 주소, 예: http://10.14.61.56:8080
-pi_state = {"ok": None}
+PI = None          # 파이 촬영 프로그램 주소, 예: http://dmdpi.local:8080
+pi_state = {"ok": None, "base": None, "at": 0.0}
+
+
+def pi_base():
+    """파이 주소의 이름(예: dmdpi.local)을 IP로 바꾼 주소 (1분마다 다시 찾음).
+    노트북(Windows)은 .local 이름을 찾지만 태블릿(안드로이드)은 못 찾는 경우가 많아, 앱에는 IP 주소로 알려 줌"""
+    from urllib.parse import urlsplit
+    import socket
+    if pi_state["base"] and time.time() - pi_state["at"] < 60:
+        return pi_state["base"]
+    u = urlsplit(PI)
+    try:
+        ip = socket.gethostbyname(u.hostname)
+        base = f"{u.scheme}://{ip}" + (f":{u.port}" if u.port else "")
+        if base != pi_state["base"] and ip != u.hostname:
+            print(f"[파이] {u.hostname} → {ip}")
+    except OSError:
+        base = PI   # 못 찾으면 이름 그대로 (나중에 다시)
+    pi_state["base"], pi_state["at"] = base, time.time()
+    return base
 
 
 def pi_url(path, **q):
     from urllib.parse import urlencode
     if TOKEN:
         q["t"] = TOKEN
-    return f"{PI}{path}" + ("?" + urlencode(q) if q else "")
+    return f"{pi_base()}{path}" + ("?" + urlencode(q) if q else "")
 
 
 def pi_send_mission(doc):
@@ -369,8 +389,16 @@ def pi_poll():
     while True:
         time.sleep(5)
         mid = local_mission["id"]
-        if not mid:
-            continue
+        if not mid:   # 브리지를 다시 켠 경우: 파이가 갖고 있는 지금 임무(12시간 안)를 이어서
+            try:
+                doc = json.loads(urllib.request.urlopen(pi_url("/mission"), timeout=4).read())
+                if doc.get("mission") and time.time() - float(doc.get("at") or 0) < 12 * 3600:
+                    local_mission["id"] = mid = doc["mission"]
+                    print(f"[파이] 진행 중이던 임무 {mid}를 이어서 받습니다")
+            except Exception:
+                pass
+            if not mid:
+                continue
         try:
             got = {k: json.loads(urllib.request.urlopen(pi_url("/" + k, mission=mid), timeout=4).read()) for k in ("detections", "photos")}
         except Exception:
@@ -599,6 +627,8 @@ def handle_msg(conn, msg, mavutil):
             if msg.type == MAV_TYPE_GCS or msg.autopilot == MAV_AUTOPILOT_INVALID:
                 return
             armed = bool(msg.base_mode & 128)
+            if sid not in vehicles:
+                print(f"[MAVLink] 기체 {sid}번 연결됨 ({'PX4' if msg.autopilot == 12 else f'autopilot {msg.autopilot} — PX4가 아니면 명령은 거부됨'})")
             vehicles[sid] = {"conn": conn, "autopilot": msg.autopilot, "armed": armed, "comp": msg.get_srcComponent(), "seen": time.time()}
             d = tel(sid)
             d["armed"] = armed
@@ -873,12 +903,17 @@ async def main():
     ap.add_argument("--rate", type=float, default=2, help="앱으로 보내는 횟수(초당)")
     ap.add_argument("--token", default=os.environ.get("GCS_BRIDGE_TOKEN", ""),
                     help="앱 접속 비밀번호 (앱 설정 → 브리지 비밀번호에 같은 값). 환경 변수 GCS_BRIDGE_TOKEN으로도 지정")
-    ap.add_argument("--pi", help="노트북 브리지 방식: 파이 촬영 프로그램 주소 (예: http://10.14.61.56:8080). 경로를 올릴 때 임무 정보를 보내고, Wi-Fi가 닿으면 사진·탐지를 받아 옴")
+    ap.add_argument("--pi", help="노트북 브리지 방식: 파이 촬영 프로그램 주소 (예: http://dmdpi.local:8080). 경로를 올릴 때 임무 정보를 보내고, Wi-Fi가 닿으면 사진·탐지를 받아 옴")
     ap.add_argument("--qgc", help="무선기를 QGroundControl과 같이 쓰기 (예: udpout:127.0.0.1:14550)")
     ap.add_argument("--local", help="사진 폴더: 인터넷 없이 Wi-Fi로 쓸 때 (파이에서 실행). 촬영 프로그램과 같은 폴더")
     ap.add_argument("--cert")
     ap.add_argument("--key")
     a = ap.parse_args()
+    try:   # Windows: 콘솔 글꼴에 없는 글자가 있어도 브리지가 멈추지 않게
+        sys.stdout.reconfigure(errors="replace")
+        sys.stderr.reconfigure(errors="replace")
+    except Exception:
+        pass
     global TOKEN, LOCAL, PI, QGC_URL
     TOKEN = a.token
     QGC_URL = a.qgc

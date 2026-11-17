@@ -11,27 +11,29 @@
 
 ```
 픽스호크 ─ /dev/serial0 ─ mavproxy ─┬─ udp:10.14.61.172:14550 → 노트북 QGroundControl
-                                   ├─ udp:127.0.0.1:14560    → 브리지 (ws://10.14.61.56:8766 → 태블릿 앱)
+                                   ├─ udp:127.0.0.1:14560    → 브리지 (ws://dmdpi.local:8766 → 태블릿 앱)
                                    └─ udp:127.0.0.1:14561    → 카메라 (위치·모드 → 찍을 때 판단)
-카메라 → http://10.14.61.56:8080/video (앱 지도의 '영상' 버튼)
+카메라 → http://dmdpi.local:8080/video (앱 지도의 '영상' 버튼)
 ```
 
 ## 1. 파일 옮기기
 
 PC에서 `drone-gcs` 폴더 전체를 파이로 복사합니다. VS Code 원격 접속 중이면 왼쪽 탐색기에 폴더를 끌어다 놓아도 됩니다.
 ```bash
-scp -r drone-gcs dmdpi@10.14.61.56:~/
+scp -r drone-gcs dmdpi@dmdpi.local:~/
 ```
 
 ## 2. 설치 (한 번만)
 
 ```bash
-ssh dmdpi@10.14.61.56
+ssh dmdpi@dmdpi.local
 cd ~/drone-gcs/pi
 nano config.env          # 노트북 IP(QGC_OUT), 앱 비밀번호(TOKEN), 열화상 화각 확인
 bash install.sh
 sudo reboot
 ```
+- `config.env`의 `MODE`: **`laptop`**(드론 ─ 텔레메트리 ─ 노트북 ─ Wi-Fi ─ 태블릿, 기본값) 또는 `wifi`(태블릿이 파이에 바로). `laptop`이면 파이의 `drone-bridge`는 켜지 않습니다.
+- 재부팅 뒤 점검: `bash ~/drone-gcs/pi/check.sh` — 서비스, 시리얼, 픽스호크 하트비트, 카메라, 열화상, 저장 공간을 차례로 확인하고 ❌ 항목에 할 일을 알려 줍니다.
 - 앞에서 손으로 켜던 `cam_test.py`, `mavproxy.py`는 **같이 켜지 마세요.** 같은 시리얼 포트와 8080 포트를 서로 쓰려고 다툽니다.
 - 설치 스크립트가 하는 일: `mavproxy`·`pymavlink`·OpenCV 설치, 시리얼 켜기·로그인 셸 끄기(직접 하신 `raspi-config` 두 줄과 같음), I2C 켜기(열화상), 자동 실행 서비스 3개 등록.
 - CSI 카메라는 `libcamerify`를 붙여 자동으로 실행합니다 (`libcamerify python3 cam_test.py`와 같은 방식).
@@ -43,15 +45,15 @@ systemctl status drone-mavproxy drone-bridge drone-camera     # 셋 다 active (
 journalctl -u drone-camera -f                                 # 카메라 로그
 journalctl -u drone-bridge -f                                 # 브리지 로그 ("[MAVLink] 기체 1 연결" 이 나오면 정상)
 ```
-- 브라우저에서 `http://10.14.61.56:8080/video` → 카메라 영상 (`cam_test.py`와 같음)
+- 브라우저에서 `http://dmdpi.local:8080/video` → 카메라 영상 (`cam_test.py`와 같음)
 - QGroundControl은 전처럼 노트북에서 그대로 연결됩니다.
 
 ## 4. 앱 연결
 
 설정 → 드론 실시간 위치
 - 실시간 · 연결 방식 **브리지 · Wi-Fi**
-- 브리지 주소 `ws://10.14.61.56:8766`, 비밀번호 = `config.env`의 `TOKEN` → **연결**
-- 드론 영상 주소는 비워 두면 자동(`http://10.14.61.56:8080/video`)
+- 브리지 주소 `ws://dmdpi.local:8766`, 비밀번호 = `config.env`의 `TOKEN` → **연결**
+- 드론 영상 주소는 비워 두면 자동(`http://dmdpi.local:8080/video`)
 
 지도 왼쪽 버튼 줄의 **카메라 모양 버튼**을 누르면 드론 영상이 작은 창으로 뜹니다 (‘크게’로 키우기).
 
@@ -61,7 +63,7 @@ journalctl -u drone-bridge -f                                 # 브리지 로그
 - 파이 `config.env`: `QGC_OUT=""` (QGC는 노트북에서 무선기로), `TOKEN`은 노트북 배치 파일과 같게.
 - 파이의 `drone-bridge`는 필요 없음: `sudo systemctl disable --now drone-bridge`. `drone-mavproxy`(카메라가 위치를 받음)와 `drone-camera`는 그대로.
 - 노트북 브리지가 경로를 올릴 때 이 파이의 `http://<파이>:8080/mission`으로 임무 정보를 보내고, 사진·탐지는 `/photos`·`/detections`·`/files/...`로 가져갑니다.
-- PX4: 무선기 포트 TELEM1은 기본값, 파이 포트 TELEM2는 `MAV_1_FORWARD = 1` (파이의 탐지 알림이 무선기로 넘어감).
+- PX4: 무선기 포트 TELEM1은 기본값, 두 포트 모두 `MAV_0_FORWARD = 1`, `MAV_1_FORWARD = 1` (파이의 탐지 알림이 무선기로 넘어감).
 
 ## 5. 임무 중에 하는 일
 
@@ -71,7 +73,7 @@ journalctl -u drone-bridge -f                                 # 브리지 로그
    - 사진 정보는 `photos.jsonl` → 브리지가 바로 앱에 보냄 → 지도에서 칸을 누르면 사진이 보임
 3. 열화상(MLX90640)이 있으면 사진마다 평균 온도를 같이 올려 앱 '온도 보기' 열지도가 채워지고,
    주변보다 3°C 이상 따뜻한 점(사람 후보)과 45°C 이상(불)은 **탐지**로 앱에 알림이 갑니다.
-   - 같은 알림을 MAVLink(`DET d1 위도 경도 온도`)로도 보내서, 텔레메트리 무선기로 연결해도 알림을 받습니다 (PX4 `MAV_1_FORWARD = 1` 필요).
+   - 같은 알림을 MAVLink(`DET d1 위도 경도 온도`)로도 보내서, 텔레메트리 무선기로 연결해도 알림을 받습니다 (PX4 `MAV_0_FORWARD = 1`, `MAV_1_FORWARD = 1` 필요).
 4. 사진 시각은 PX4의 GPS 시각으로 맞춥니다 (파이는 인터넷이 없으면 시계가 틀림).
 
 ## 6. 열화상 (선택)

@@ -18,7 +18,9 @@ sudo raspi-config nonint do_serial_hw 0      # 시리얼 하드웨어 켬
 sudo raspi-config nonint do_serial_cons 1    # 시리얼 로그인 셸 끔 (픽스호크와 충돌)
 sudo raspi-config nonint do_i2c 0 || true
 grep -q "i2c_arm_baudrate" /boot/firmware/config.txt 2>/dev/null || echo "dtparam=i2c_arm_baudrate=1000000" | sudo tee -a /boot/firmware/config.txt >/dev/null
-sudo usermod -aG dialout,i2c,video,gpio "$USER_NAME" || true
+for g in dialout i2c video gpio; do   # 없는 그룹이 하나 있어도 나머지는 넣음
+  getent group "$g" >/dev/null && sudo usermod -aG "$g" "$USER_NAME"
+done
 
 # 설정 파일의 사진 폴더를 지금 사용자로
 sed -i "s#^LOCAL=.*#LOCAL=/home/$USER_NAME/drone-data/local#" "$DIR/pi/config.env"
@@ -71,8 +73,16 @@ WantedBy=multi-user.target
 S
 
 sudo systemctl daemon-reload
-sudo systemctl enable drone-mavproxy drone-bridge drone-camera
+MODE="$(grep -E '^MODE=' "$DIR/pi/config.env" | cut -d= -f2 | tr -d '\" ')"
+if [ "$MODE" = "wifi" ]; then
+  sudo systemctl enable drone-mavproxy drone-bridge drone-camera
+  echo "연결 방식: wifi — 태블릿이 파이에 바로 연결 (ws://<파이 IP>:8766)"
+else
+  sudo systemctl enable drone-mavproxy drone-camera
+  sudo systemctl disable --now drone-bridge 2>/dev/null || true
+  echo "연결 방식: laptop — 노트북 laptop_bridge.bat 이 앱과 통신, 파이는 카메라만"
+fi
+chmod +x "$DIR/pi/check.sh" 2>/dev/null || true
 echo
 echo "설치 끝. 재부팅하면 자동으로 켜집니다:  sudo reboot"
-echo "상태 보기:  systemctl status drone-mavproxy drone-bridge drone-camera"
-echo "로그 보기:  journalctl -u drone-camera -f"
+echo "재부팅 뒤 점검:  bash ~/drone-gcs/pi/check.sh"

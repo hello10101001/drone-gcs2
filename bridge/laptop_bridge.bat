@@ -8,12 +8,18 @@ rem   PI      : 드론 라즈베리파이 촬영 프로그램 주소 (사진·�
 rem   TOKEN   : 앱의 브리지 비밀번호, 파이 config.env 의 TOKEN 과 같게
 set COM=COM3
 set BAUD=57600
-set PI=http://10.14.61.56:8080
+set PI=http://dmdpi.local:8080
 set TOKEN=drone1234
 
 cd /d "%~dp0"
-set PY=python
-where python >NUL 2>NUL || set PY=py
+set PYTHONIOENCODING=utf-8
+set PY=
+for %%P in (py python) do if not defined PY (%%P -c "import sys" >NUL 2>NUL && set PY=%%P)
+if not defined PY (
+  echo [오류] Python을 찾지 못했습니다. python.org 에서 설치하고 첫 화면의 "Add python.exe to PATH"를 체크하세요.
+  pause
+  exit /b 1
+)
 %PY% -c "import pymavlink, serial" 2>NUL || (echo [설치] pymavlink, pyserial 설치 중... & %PY% -m pip install pymavlink pyserial)
 set PIARG=
 if not "%PI%"=="" set PIARG=--pi %PI%

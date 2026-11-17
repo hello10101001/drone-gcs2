@@ -24,7 +24,7 @@
     python3 pi_camera.py --local ~/drone-data/local --camera 0            # USB 카메라
     python3 pi_camera.py --local ./local --fake                           # 파이·카메라 없이 시험 (가짜 드론이 mission.json 경로를 날며 찍음)
 """
-import argparse, hmac, json, math, os, threading, time
+import argparse, hmac, json, math, os, shutil, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -215,12 +215,18 @@ class Vehicle(VehicleState):
         last_hb = 0
         while True:
             if time.time() - last_hb > 1:
-                try:
-                    self.conn.mav.heartbeat_send(18, 8, 0, 0, 4)   # 보조 컴퓨터 (비행 제어기 아님 → 앱·브리지가 무시)
-                except Exception:
-                    pass
+                with self.lock:   # 촬영 스레드의 탐지 알림과 동시에 보내지 않게
+                    try:
+                        self.conn.mav.heartbeat_send(18, 8, 0, 0, 4)   # 보조 컴퓨터 (비행 제어기 아님 → 앱·브리지가 무시)
+                    except Exception:
+                        pass
                 last_hb = time.time()
-            m = self.conn.recv_match(blocking=True, timeout=0.5)
+            try:
+                m = self.conn.recv_match(blocking=True, timeout=0.5)
+            except Exception as e:   # 깨진 데이터 등으로 받기 스레드가 죽지 않게
+                log("[MAVLink] 받기 오류", e)
+                time.sleep(0.5)
+                continue
             if m is None:
                 continue
             t = m.get_type()
@@ -377,15 +383,21 @@ class Shooter:
         for sub in ("full", "thumb", "thermal"):
             os.makedirs(os.path.join(base, sub), exist_ok=True)
         self.n += 1
-        name = f"{time.strftime('%H%M%S')}_{self.n:04d}"
+        # 이름 = GPS 시각(ms) + 순번: 파이를 다시 켜서 시계가 되돌아가도 같은 이름으로 덮어쓰지 않게
+        name = f"{at}_{self.n:04d}"
+        low = shutil.disk_usage(self.out).free < self.a.min_free_mb * 1024 * 1024   # SD카드가 거의 차면 원본은 빼고 축소본만
         rel = lambda sub, ext="jpg": f"{mid}/{sid}/{sub}/{name}.{ext}"
         p = {"id": f"{sid}-{name}", "drone": int(sid), "lat": round(lat, 7), "lng": round(lng, 7), "alt": round(alt, 1),
              "hdg": round(hdg, 1), "takenAt": at, "cell": cell}
         if frame is not None:
-            cv2.imwrite(os.path.join(self.out, rel("full")), frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
             th = cv2.resize(frame, (640, int(frame.shape[0] * 640 / frame.shape[1]))) if frame.shape[1] > 640 else frame
             cv2.imwrite(os.path.join(self.out, rel("thumb")), th, [cv2.IMWRITE_JPEG_QUALITY, 75])
-            p["file"], p["thumb"] = rel("full"), rel("thumb")
+            p["thumb"] = p["file"] = rel("thumb")
+            if not low:
+                cv2.imwrite(os.path.join(self.out, rel("full")), frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                p["file"] = rel("full")
+            elif self.n % 50 == 1:
+                log(f"[촬영] SD카드 남은 공간이 {self.a.min_free_mb}MB보다 적어 원본은 저장하지 않습니다")
         if therm is not None:
             p["tempAvgC"] = round(float(therm.mean()), 2)
             cv2.imwrite(os.path.join(self.out, rel("thermal")), colorize(therm), [cv2.IMWRITE_JPEG_QUALITY, 80])
@@ -496,8 +508,14 @@ def serve(cam, port, local, token):
 
         def do_GET(self):
             path, q = self._q()
-            if (path in ("/photos", "/detections") or path.startswith("/files/")) and not self._authed(q):
+            if (path in ("/photos", "/detections", "/mission") or path.startswith("/files/")) and not self._authed(q):
                 return self._send(403, b'{"error":"token"}')
+            if path == "/mission":   # 지금 임무 정보 (노트북 브리지를 다시 켰을 때 이어 받기용)
+                try:
+                    with open(os.path.join(local, "mission.json"), "rb") as f:
+                        return self._send(200, f.read(), extra={"Cache-Control": "no-store"})
+                except OSError:
+                    return self._send(200, b"{}", extra={"Cache-Control": "no-store"})
             if path in ("/photos", "/detections"):   # 사진·탐지 목록 (out/<임무>/*.jsonl 그대로)
                 mid = os.path.basename(q.get("mission", ""))
                 lst = read_jsonl(os.path.join(out_root, mid, path[1:] + ".jsonl")) if mid else []
@@ -520,7 +538,7 @@ def serve(cam, port, local, token):
                         if j:
                             self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(j)).encode() + b"\r\n\r\n" + j + b"\r\n")
                         time.sleep(0.1)   # 초당 약 10장 (Wi-Fi 부담 줄임)
-                except (BrokenPipeError, ConnectionResetError):
+                except OSError:   # 앱이 영상 창을 닫음 (BrokenPipe·ConnectionReset 등)
                     return
             elif self.path.startswith("/snapshot"):
                 j = cam.stream_jpeg()
@@ -558,6 +576,7 @@ def main():
     ap.add_argument("--fire", type=float, default=45.0, help="이 온도(°C) 이상은 불")
     ap.add_argument("--dedup-m", type=float, default=10)
     ap.add_argument("--dedup-s", type=float, default=30)
+    ap.add_argument("--min-free-mb", type=float, default=500, help="SD카드 남은 공간이 이보다 적으면 원본 사진은 저장하지 않음")
     ap.add_argument("--token", default=os.environ.get("TOKEN", ""), help="사진·임무 주고받을 때 비밀번호 (브리지 --token과 같게)")
     ap.add_argument("--fake", action="store_true", help="파이·카메라 없이 시험")
     ap.add_argument("--fake-hot", help="가짜 사람 위치 '위도,경도' (--fake)")
