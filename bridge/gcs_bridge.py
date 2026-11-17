@@ -46,6 +46,12 @@
      라즈베리파이의 탐지 알림은 STATUSTEXT "DET <번호> <위도> <경도> <온도>" 로 무선기를 거쳐 옴 → 앱에 탐지로 보냄
      (PX4: 파이가 연결된 포트의 MAV_x_FORWARD = 1)
 
+  6) 노트북 브리지 (드론 ─ 텔레메트리 무선기 ─ 노트북 ─ Wi-Fi ─ 태블릿 앱)
+       python gcs_bridge.py --mav COM3,57600 --pi http://10.14.61.56:8080 --qgc udpout:127.0.0.1:14550 --token 비밀번호
+       --pi  : 파이 촬영 프로그램(pi_camera.py). 경로를 올릴 때 임무 정보를 보내고, 파이 Wi-Fi가 닿으면(이륙 전·착륙 뒤) 사진·탐지를 받아 옴
+               비행 중 탐지 알림은 무선기(STATUSTEXT "DET ...")로 바로 옴
+       --qgc : 같은 무선기를 노트북 QGroundControl에서도 보기 (QGC는 UDP 14550 자동 연결)
+
   3) 앱 연결: 설정 → 드론 실시간 위치 → '실시간' → 브리지 주소 → 연결
      비밀번호: 브리지를 --token 비밀번호 로 켜고(또는 환경 변수 GCS_BRIDGE_TOKEN), 앱의 '브리지 비밀번호'에 같은 값을 넣습니다.
        비밀번호가 맞아야 드론 위치를 받고 명령을 보낼 수 있습니다. 비밀번호 없이 켜면 같은 네트워크의 누구나 접속할 수 있습니다.
@@ -163,8 +169,8 @@ async def ws_reader(reader, writer, peer):
                         authed = True
                         clients.add(writer)
                         print(f"[앱 연결] {peer} (현재 {len(clients)}개)")
-                    await send_one(writer, {"type": "auth", "ok": True})
-                    if LOCAL:   # 연결이 끊긴 동안 생긴 탐지·사진 (앱이 같은 것은 거름)
+                    await send_one(writer, {"type": "auth", "ok": True, "pi": PI})   # pi: 앱이 드론 영상(<pi>/video)을 바로 볼 주소
+                    if LOCAL or PI:   # 연결이 끊긴 동안 생긴 탐지·사진 (앱이 같은 것은 거름)
                         backlog = local_backlog()
                         if backlog:
                             await send_one(writer, backlog)
@@ -192,7 +198,7 @@ async def handle(reader, writer):
                 headers[k.strip().lower()] = v.strip()
         key = headers.get("sec-websocket-key")
         target = req.decode("latin-1").split("\r\n", 1)[0].split(" ")
-        if not key and LOCAL and len(target) > 1 and target[1].startswith(("/photos", "/detections", "/files/")):
+        if not key and (LOCAL or PI) and len(target) > 1 and target[1].startswith(("/photos", "/detections", "/files/")):
             await local_http(writer, target[1])
             return
         if not key:  # 브라우저로 주소를 직접 연 경우 (인증서 허용용)
@@ -245,11 +251,16 @@ local_mission = {"id": None}
 CTYPE = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".json": "application/json"}
 
 
+def mission_doc(m):
+    """촬영 프로그램이 볼 임무 정보: 임무 번호·칸 격자·촬영 간격·경로"""
+    return {"mission": m.get("mission"), "grid": m.get("grid"), "reshoot": bool(m.get("reshoot")), "at": time.time(),
+            "drones": {str(int(d.get("id", 0))): {k: d.get(k) for k in ("home", "alt", "speed", "shot", "takeoff", "cam", "route")}
+                       for d in m.get("drones", [])}}
+
+
 def local_write_mission(m):
-    """앱이 경로를 올리면 촬영 프로그램이 볼 임무 정보(임무 번호·칸 격자·촬영 간격·경로)를 씀"""
-    doc = {"mission": m.get("mission"), "grid": m.get("grid"), "reshoot": bool(m.get("reshoot")), "at": time.time(),
-           "drones": {str(int(d.get("id", 0))): {k: d.get(k) for k in ("home", "alt", "speed", "shot", "takeoff", "cam", "route")}
-                      for d in m.get("drones", [])}}
+    """앱이 경로를 올리면 (같은 파이 안의) 촬영 프로그램이 볼 mission.json을 씀"""
+    doc = mission_doc(m)
     os.makedirs(LOCAL, exist_ok=True)
     tmp = os.path.join(LOCAL, "mission.json.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
@@ -325,6 +336,63 @@ def local_tail():
         time.sleep(1)
 
 
+# ----- 노트북 브리지 방식 (--pi): 드론은 텔레메트리 무선기로, 사진은 파이 Wi-Fi가 닿을 때 파이의 pi_camera.py에서 -----
+QGC_URL = None
+PI = None          # 파이 촬영 프로그램 주소, 예: http://10.14.61.56:8080
+pi_state = {"ok": None}
+
+
+def pi_url(path, **q):
+    from urllib.parse import urlencode
+    if TOKEN:
+        q["t"] = TOKEN
+    return f"{PI}{path}" + ("?" + urlencode(q) if q else "")
+
+
+def pi_send_mission(doc):
+    """경로를 올릴 때 파이에 임무 정보를 보냄 (보통 이륙 전이라 파이 Wi-Fi가 닿음). 실패해도 비행은 됨 — 사진 칸 번호만 빠짐"""
+    import urllib.request
+    try:
+        req = urllib.request.Request(pi_url("/mission"), data=json.dumps(doc).encode("utf-8"), headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=6).read()
+        text, ok = f"파이에 임무 정보 전달 ({doc['mission']}) — 사진을 찍습니다", True
+    except Exception as e:
+        text, ok = f"파이에 임무 정보를 못 보냈습니다 ({e.__class__.__name__}) — 이륙 전에 파이 Wi-Fi 연결을 확인하고 경로를 다시 올리세요", False
+    print("[파이]", text)
+    with lock:
+        events.append({"type": "status", "id": 0, "text": text, "sev": 6 if ok else 4})
+
+
+def pi_poll():
+    """5초마다 파이에 이번 임무의 사진·탐지 목록을 물어봄 (안 닿으면 조용히 넘어감) → 새 것만 앱에 보냄"""
+    import urllib.request
+    while True:
+        time.sleep(5)
+        mid = local_mission["id"]
+        if not mid:
+            continue
+        try:
+            got = {k: json.loads(urllib.request.urlopen(pi_url("/" + k, mission=mid), timeout=4).read()) for k in ("detections", "photos")}
+        except Exception:
+            if pi_state["ok"]:
+                print("[파이] Wi-Fi가 닿지 않음 (비행 중이면 정상) — 돌아오면 이어서 받음")
+            pi_state["ok"] = False
+            continue
+        if not pi_state["ok"]:
+            print("[파이] Wi-Fi 연결됨 — 사진·탐지를 받아 옵니다")
+        pi_state["ok"] = True
+        with lock:
+            msgs = [x for k in ("detections", "photos") for v in got[k] for x in [local_line(mid, k, v)] if x]
+            events.extend(msgs)
+
+
+def pi_file(rel):
+    import urllib.request
+    from urllib.parse import quote
+    with urllib.request.urlopen(pi_url("/files/" + quote(rel)), timeout=10) as r:
+        return r.read()
+
+
 def local_backlog():
     mid = local_mission["id"]
     if not mid:
@@ -362,6 +430,13 @@ async def local_http(writer, target):
         with lock:
             lst = [p for p in local_photos.get(mid, []) if cell is None or p["cell"] in (cell, None)]
         reply("200 OK", json.dumps(lst, ensure_ascii=False).encode("utf-8"), extra="Cache-Control: no-store\r\n")
+    elif not LOCAL:   # --pi: 사진 파일은 파이에서 가져다 줌
+        rel = unquote(u.path[len("/files/"):])
+        try:
+            data = await asyncio.get_running_loop().run_in_executor(None, pi_file, rel)
+            reply("200 OK", data, CTYPE.get(os.path.splitext(rel)[1].lower(), "application/octet-stream"), "Cache-Control: max-age=86400\r\n")
+        except Exception:
+            reply("504 Gateway Timeout", b'{"error":"pi unreachable"}')
     else:
         root = os.path.realpath(os.path.join(LOCAL, "out"))
         path = os.path.realpath(os.path.join(root, unquote(u.path[len("/files/"):])))
@@ -421,6 +496,9 @@ def on_app_message(m):
         print(f"[upload] 임무 {m.get('mission')} · 드론 {len(m.get('drones', []))}기")
         if LOCAL:
             local_write_mission(m)
+        if PI:
+            local_mission["id"] = m.get("mission")
+            threading.Thread(target=pi_send_mission, args=(mission_doc(m),), daemon=True).start()
         for d in m.get("drones", []):
             sid = int(d.get("id", 0))
             err = check_route(d)
@@ -462,10 +540,27 @@ NAN = float("nan")                   # PX4: 방향(yaw) NaN = 현재 방향 유�
 DET_RE = re.compile(r"^DET\s+(\S+)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)")   # "DET <번호> <위도> <경도> <온도>"
 MAV_AUTOPILOT_INVALID = 8            # 비행 제어기가 아닌 장치(카메라·짐벌·라즈베리파이 등)의 하트비트
 last_hb = {}                         # 연결 -> 마지막 GCS 하트비트 시각
+QGC = {"out": None, "src": None}     # --qgc: 무선기 하나를 QGroundControl과 같이 씀 (드론 메시지를 그대로 넘기고, QGC 명령을 드론에)
+
+
+def qgc_pump(conn):
+    q = QGC["out"]
+    if not q or conn is not QGC["src"]:
+        return
+    for _ in range(50):
+        try:
+            m = q.recv_msg()
+        except Exception:
+            return
+        if m is None:
+            return
+        if m.get_type() != "BAD_DATA":
+            conn.write(m.get_msgbuf())
 
 
 def gcs_heartbeat(conn):
     """1초마다 GCS 하트비트. 업로드처럼 오래 걸리는 작업 중에도 보내야 PX4가 '지상국 끊김'으로 판단하지 않음"""
+    qgc_pump(conn)
     now = time.time()
     if now - last_hb.get(conn, 0) >= 1:
         conn.mav.heartbeat_send(MAV_TYPE_GCS, MAV_AUTOPILOT_INVALID, 0, 0, 0)
@@ -488,6 +583,11 @@ def m_per_lng(lat):
 
 
 def handle_msg(conn, msg, mavutil):
+    if QGC["out"] and conn is QGC["src"] and msg.get_type() != "BAD_DATA":
+        try:
+            QGC["out"].write(msg.get_msgbuf())   # 드론 메시지를 QGroundControl에도 그대로
+        except Exception:
+            pass
     sid = msg.get_srcSystem()
     if not 1 <= sid <= MAX_SYSID:
         return
@@ -639,6 +739,9 @@ def mav_worker(conn_str):
     else:
         conn = mavutil.mavlink_connection(conn_str, **kw)
     jobs[conn] = queue.Queue()
+    if QGC_URL and QGC["src"] is None:
+        QGC["out"], QGC["src"] = mavutil.mavlink_connection(QGC_URL, source_system=GCS_SYSID), conn
+        print(f"[MAVLink] QGroundControl로도 보냄: {QGC_URL}")
     print(f"[MAVLink] {conn_str} 수신 대기")
     while True:
         gcs_heartbeat(conn)   # PX4 데이터 링크 끊김 페일세이프 판단에 쓰임
@@ -770,12 +873,21 @@ async def main():
     ap.add_argument("--rate", type=float, default=2, help="앱으로 보내는 횟수(초당)")
     ap.add_argument("--token", default=os.environ.get("GCS_BRIDGE_TOKEN", ""),
                     help="앱 접속 비밀번호 (앱 설정 → 브리지 비밀번호에 같은 값). 환경 변수 GCS_BRIDGE_TOKEN으로도 지정")
+    ap.add_argument("--pi", help="노트북 브리지 방식: 파이 촬영 프로그램 주소 (예: http://10.14.61.56:8080). 경로를 올릴 때 임무 정보를 보내고, Wi-Fi가 닿으면 사진·탐지를 받아 옴")
+    ap.add_argument("--qgc", help="무선기를 QGroundControl과 같이 쓰기 (예: udpout:127.0.0.1:14550)")
     ap.add_argument("--local", help="사진 폴더: 인터넷 없이 Wi-Fi로 쓸 때 (파이에서 실행). 촬영 프로그램과 같은 폴더")
     ap.add_argument("--cert")
     ap.add_argument("--key")
     a = ap.parse_args()
-    global TOKEN, LOCAL
+    global TOKEN, LOCAL, PI, QGC_URL
     TOKEN = a.token
+    QGC_URL = a.qgc
+    if a.pi:
+        PI = a.pi.rstrip("/")
+        if not PI.startswith("http"):
+            PI = "http://" + PI
+        threading.Thread(target=pi_poll, daemon=True).start()
+        print(f"[파이] 촬영 프로그램: {PI} (경로 업로드 때 임무 정보 전달, Wi-Fi가 닿으면 사진·탐지 받기)")
     if a.local:
         LOCAL = os.path.abspath(a.local)
         os.makedirs(os.path.join(LOCAL, "out"), exist_ok=True)
