@@ -81,6 +81,10 @@ def run(doc):
                 f.write(jpeg(f"drone {sid} #{i} cell {cell}"))
             p = {"id": f"{sid}-{name}", "drone": int(sid), "lat": round(la, 7), "lng": round(lo, 7), "alt": z, "hdg": 0, "takenAt": now,
                  "cell": cell, "tempAvgC": round(14 + 3 * math.sin(i / 7), 2), "thumb": f"{mid}/{sid}/thumb/{name}.jpg", "file": f"{mid}/{sid}/thumb/{name}.jpg"}
+            with open(os.path.join(base, "thermal", name + ".jpg"), "wb") as f:   # 실제 촬영 프로그램처럼 사진마다 열화상도
+                f.write(jpeg(f"thermal {sid} #{i}"))
+            p["thermal"] = f"{mid}/{sid}/thermal/{name}.jpg"
+            p["northUp"] = True
             with open(os.path.join(ROOT, "out", mid, "photos.jsonl"), "a", encoding="utf-8") as f:
                 f.write(json.dumps(p) + "\n")
             if i % 25 == 12:

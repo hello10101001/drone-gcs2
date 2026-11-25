@@ -34,13 +34,19 @@ sudo systemctl start drone-camera
 echo "[4] 카메라 · 영상"
 sleep 3
 code=$(curl -s -o /tmp/snap.jpg -w "%{http_code}" "http://127.0.0.1:${PORT:-8080}/snapshot")
-[ "$code" = "200" ] && ok "카메라 화면 받음 → 브라우저에서 http://$(hostname -I | awk '{print $1}'):8080/video" || bad "카메라 화면 없음 → journalctl -u drone-camera -n 30"
+[ "$code" = "200" ] && ok "카메라 화면 받음 → 브라우저에서 http://$(hostname -I | awk '{print $1}'):8080/video (확인용)" || bad "카메라 화면 없음 → journalctl -u drone-camera -n 30"
 
 echo "[5] 열화상"
 journalctl -u drone-camera -b --no-pager | grep -q "MLX90640 연결됨" && ok "MLX90640 연결됨" || echo "  ⚠ 열화상 없음 (없어도 일반 사진은 찍음) → i2cdetect -y 1 에 33이 보여야 함"
+if curl -s -m 3 "http://127.0.0.1:8090/thermal.json" | grep -q '"ok": true'; then
+  ok "열화상 화면 → 브라우저 http://$(hostname -I | awk '{print $1}'):8090 (앱에서는 칸을 누르면 그 칸의 열화상 사진)"
+elif journalctl -u drone-camera -b --no-pager | grep -q "8090 포트를 다른 프로그램"; then
+  bad "8090을 다른 열화상 프로그램이 쓰고 있음 → 그 프로그램을 끄고 sudo systemctl restart drone-camera (같은 센서를 둘이 읽으면 값이 깨짐)"
+fi
 
 echo "[6] 저장 공간"
 df -h "$LOCAL" | awk 'NR==2{print "  남은 공간 "$4" (사진 폴더 '"$LOCAL"')"}'
 
 echo "[7] 이 파이 주소"
 echo "  $(hostname -I)"
+echo "  찍은 사진 보기 (브라우저): http://$(hostname -I | awk '{print $1}'):8080/gallery?t=$TOKEN"

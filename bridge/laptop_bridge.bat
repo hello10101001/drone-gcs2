@@ -27,7 +27,8 @@ echo.
 echo 태블릿 앱: 설정 - 연결 방식 "브리지 · Wi-Fi" - 주소 ws://(이 노트북 IP):8766  /  비밀번호 %TOKEN%
 echo 이 노트북 IP:
 ipconfig | findstr /R /C:"IPv4"
-echo QGroundControl도 같이 켜면 무선기를 같이 씁니다 (UDP 14550 자동 연결).
+echo QGroundControl도 같이 쓰려면: QGC 설정 - 일반 - 자동 연결(AutoConnect)에서 SiK Radio, Pixhawk 체크를 끄세요.
+echo   (QGC가 무선기 COM 포트를 먼저 잡으면 이 브리지가 드론 정보를 못 받습니다. QGC는 UDP 14550으로 자동 연결됩니다.)
 echo.
 %PY% -u gcs_bridge.py --mav %COM%,%BAUD% %PIARG% --qgc udpout:127.0.0.1:14550 --token %TOKEN%
 pause

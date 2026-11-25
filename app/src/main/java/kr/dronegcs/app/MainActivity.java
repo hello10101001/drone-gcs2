@@ -13,6 +13,9 @@ import android.app.PendingIntent;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -44,16 +47,22 @@ import com.hoho.android.usbserial.util.SerialInputOutputManager;
 
 import org.json.JSONObject;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.IOException;
+import java.net.DatagramSocket;
 import java.net.HttpURLConnection;
+import java.net.InetAddress;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 드론 수색 GCS 안드로이드 앱.
@@ -114,13 +123,14 @@ public class MainActivity extends Activity {
         web.setWebViewClient(new WebViewClient() {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest req) {
-                return assets.shouldInterceptRequest(req.getUrl());
+                return intercept(req.getUrl());
             }
 
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
                 Uri u = req.getUrl();
                 if (HOST.equals(u.getHost())) return false;
+                if (!req.isForMainFrame()) return false;  // 앱 안의 작은 화면(열화상 칸)은 앱 안에서 열기
                 try { startActivity(new Intent(Intent.ACTION_VIEW, u)); } catch (Exception ignored) { }
                 return true;  // 외부 링크는 기본 브라우저로
             }
@@ -162,13 +172,128 @@ public class MainActivity extends Activity {
             ServiceWorkerController.getInstance().setServiceWorkerClient(new ServiceWorkerClient() {
                 @Override
                 public WebResourceResponse shouldInterceptRequest(WebResourceRequest req) {
-                    return assets.shouldInterceptRequest(req.getUrl());
+                    return intercept(req.getUrl());
                 }
             });
         }
 
         // 시스템이 앱을 정리했다가 다시 열 때 복원에 실패하면 처음부터 불러옴 (흰 화면 방지)
         if (saved == null || web.restoreState(saved) == null) web.loadUrl(START_URL);
+    }
+
+    /* ---------- 같은 Wi-Fi 기기(라즈베리파이·노트북 브리지)에 앱이 대신 연결 ----------
+     * 웹 화면은 https://appassets... 주소라 http://dmdpi.local:8080 같은 주소에 바로 요청하면
+     * WebView가 막거나(보안 연결 → 내부망), .local 이름을 못 찾거나, 인터넷 없는 핫스팟이면 모바일 데이터로 나가 버림.
+     * 그래서 웹은 https://appassets.androidplatform.net/net/<주소:포트>/<경로> 로 요청하고, 여기서 Wi-Fi로 받아 넘겨 줌. */
+    private static final String NET = "/net/";
+
+    private WebResourceResponse intercept(Uri u) {
+        String p = u.getEncodedPath();
+        if (HOST.equals(u.getHost()) && p != null && p.startsWith(NET)) return netProxy(u);
+        return assets.shouldInterceptRequest(u);
+    }
+
+    /** Wi-Fi 네트워크 (인터넷이 없는 핫스팟이어도). 없으면 null (태블릿이 직접 핫스팟을 켠 경우 등) */
+    private Network wifi() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            for (Network n : cm.getAllNetworks()) {
+                NetworkCapabilities c = cm.getNetworkCapabilities(n);
+                if (c != null && c.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return n;
+            }
+        } catch (Exception ignored) { }
+        return null;
+    }
+
+    /** 이름 → IP. .local은 파이에 mDNS로 먼저 물어봄 (안드로이드는 .local을 못 찾는 기기가 많음) */
+    private InetAddress resolve(String host, Network w) throws Exception {
+        InetAddress a = LocalNet.cached(host);
+        if (a != null) return a;
+        if (host.matches("[0-9.]+")) return InetAddress.getByName(host);
+        if (host.endsWith(".local")) {
+            try (DatagramSocket s = new DatagramSocket()) {
+                if (w != null) w.bindSocket(s);
+                a = LocalNet.mdns(host, s, InetAddress.getByName("224.0.0.251"), 5353);
+            } catch (Exception ignored) { }
+        }
+        if (a == null) {
+            try { a = w != null ? w.getByName(host) : InetAddress.getByName(host); } catch (Exception ignored) { }
+        }
+        if (a == null) throw new Exception("no name");
+        LocalNet.remember(host, a);
+        return a;
+    }
+
+    private static WebResourceResponse netFail(String msg) {
+        Map<String, String> h = new HashMap<>();
+        h.put("Access-Control-Allow-Origin", "*");
+        h.put("Cache-Control", "no-store");
+        return new WebResourceResponse("text/plain", "utf-8", 502, "Bad Gateway", h,
+                new ByteArrayInputStream(msg.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private WebResourceResponse netProxy(Uri u) {
+        String rest = u.getEncodedPath().substring(NET.length());
+        int sl = rest.indexOf('/');
+        String hp = sl < 0 ? rest : rest.substring(0, sl), path = sl < 0 ? "/" : rest.substring(sl), q = u.getEncodedQuery();
+        String host = hp;
+        int port = 80;
+        int c = hp.lastIndexOf(':');
+        try {
+            if (c > 0) { host = hp.substring(0, c); port = Integer.parseInt(hp.substring(c + 1)); }
+        } catch (NumberFormatException e) { return netFail("주소의 포트가 이상함: " + hp); }
+        Network w = wifi();
+        InetAddress a;
+        try { a = resolve(host, w); } catch (Exception e) {
+            return netFail(host + " 이름을 찾지 못함 — 파이에서 hostname -I 로 IP를 보고 설정 → '라즈베리파이 주소'에 http://IP:" + port);
+        }
+        if (!LocalNet.isLocal(a)) return netFail(host + "(" + a.getHostAddress() + ")는 같은 Wi-Fi 주소가 아님");
+        URL url;
+        try { url = new URL("http", a.getHostAddress(), port, path + (q != null ? "?" + q : "")); }
+        catch (Exception e) { return netFail("주소가 이상함: " + hp + path); }
+        HttpURLConnection h = null;
+        IOException last = null;
+        for (Network n : w != null ? new Network[]{w, null} : new Network[]{null}) {   // Wi-Fi로 먼저, 안 되면 기본 경로
+            try {
+                h = (HttpURLConnection) (n != null ? n.openConnection(url) : url.openConnection());
+                h.setConnectTimeout(4000);
+                h.setReadTimeout(15000);
+                h.setUseCaches(false);
+                h.getResponseCode();
+                break;
+            } catch (IOException e) {
+                last = e;
+                if (h != null) h.disconnect();
+                h = null;
+            }
+        }
+        if (h == null) {
+            LocalNet.remember(host, null);   // IP가 바뀌었을 수 있으니 다음엔 다시 찾음
+            String t = String.valueOf(last);
+            return netFail(t.contains("refused") || t.contains("ECONNREFUSED")
+                    ? host + "(" + a.getHostAddress() + ")에는 닿지만 " + port + "번 포트가 꺼져 있음 — 파이면 sudo systemctl status drone-camera"
+                    : host + "(" + a.getHostAddress() + ")에 연결 안 됨 — 태블릿이 같은 Wi-Fi(핫스팟)인지, 핫스팟의 '기기 간 차단'이 꺼져 있는지");
+        }
+        try {
+            int code = h.getResponseCode();
+            if (code >= 300 && code < 400) code = 502;
+            InputStream in = code >= 400 ? h.getErrorStream() : h.getInputStream();
+            if (in == null) in = new ByteArrayInputStream(new byte[0]);
+            String ct = h.getContentType() == null ? "application/octet-stream" : h.getContentType();
+            String mime = ct.split(";")[0].trim(), enc = null;
+            for (String part : ct.split(";")) {
+                part = part.trim();
+                if (part.toLowerCase().startsWith("charset=")) enc = part.substring(8);
+            }
+            Map<String, String> hd = new HashMap<>();
+            hd.put("Access-Control-Allow-Origin", "*");
+            String cc = h.getHeaderField("Cache-Control");
+            hd.put("Cache-Control", cc != null ? cc : "no-store");
+            return new WebResourceResponse(mime, enc, code, code < 400 ? "OK" : "Error", hd, in);
+        } catch (IOException e) {
+            h.disconnect();
+            return netFail(host + " 응답을 받다가 끊김");
+        }
     }
 
     private boolean hasLocationPermission() {
