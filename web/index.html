@@ -457,7 +457,7 @@ td.r,th.r{text-align:right}
               <label>촬영 비행 속도 (m/s)<input id="pSpeed" type="number" inputmode="decimal" min="2" max="20" step="0.5"></label>
               <label>상승 속도 (m/s)<input id="pClimb" type="number" inputmode="decimal" min="0.5" max="10" step="0.5"></label>
               <label>하강 속도 (m/s)<input id="pDescent" type="number" inputmode="decimal" min="0.3" max="5" step="0.1"></label>
-              <label>비행 고도 (m)<input id="pAlt" type="number" inputmode="decimal" min="30" max="150" step="5"></label>
+              <label>비행 고도 (m)<input id="pAlt" type="number" inputmode="decimal" min="10" max="150" step="5"></label>
               <label>카메라 가로 화각 (°)<input id="pFov" type="number" inputmode="decimal" min="30" max="120" step="1"></label>
               <label>열화상 가로 화각 (°)<input id="pTfov" type="number" inputmode="decimal" min="10" max="120" step="1"></label>
               <label>측면 중첩 (%)<input id="pOverlap" type="number" inputmode="decimal" min="0" max="80" step="5"></label>
@@ -3751,11 +3751,20 @@ $("wSpeed").onchange=$("wDir").onchange=()=>{
 };
 const fleetChanged=()=>{saveAll();renderFleet();replan(S.mode==="auto")};   // 기체·성능 설정이 바뀜 → 저장, 목록·계획 다시
 $("specForm").addEventListener("change",e=>{
-  const map2={pFlight:["flight",5,60],pReserve:["reserve",0,50],pSpeed:["speed",2,20],pClimb:["climb",.5,10],pDescent:["descent",.3,5],pAlt:["alt",30,150],pFov:["fov",30,120],pTfov:["tfov",10,120],pOverlap:["overlap",0,80],pFwd:["fwd",0,90],pPhotoMB:["photoMB",1,50]};
+  const map2={pFlight:["flight",5,60],pReserve:["reserve",0,50],pSpeed:["speed",2,20],pClimb:["climb",.5,10],pDescent:["descent",.3,5],pAlt:["alt",10,150],pFov:["fov",30,120],pTfov:["tfov",10,120],pOverlap:["overlap",0,80],pFwd:["fwd",0,90],pPhotoMB:["photoMB",1,50]};
   const k=map2[e.target.id];if(!k)return;const v=parseFloat(e.target.value);
   spec[k[0]]=isFinite(v)?clamp(v,k[1],k[2]):DEFAULT_SPEC[k[0]];e.target.value=spec[k[0]];
   fleetChanged();
+  if(["alt","speed","fwd","fov","tfov"].includes(k[0]))shotSpeedCheck();
 });
+/* 낮게 날면 사진 간격이 짧아짐 → 열화상 센서(MLX90640: 0.5초에 한 장)가 못 따라가면 속도를 낮추자고 함 */
+const THERM_SEC=0.5;
+function shotSpeedCheck(){
+  const shot=capability().shot,t=shot/spec.speed;if(t>=THERM_SEC)return;
+  const v=Math.max(2,Math.floor(shot/THERM_SEC*2)/2);
+  ask("촬영 비행 속도가 너무 빠릅니다",`높이 ${spec.alt}m에서는 ${shot.toFixed(1)}m마다 찍어야 해서, ${spec.speed}m/s로 날면 ${t.toFixed(2)}초마다 찍어야 합니다. 열화상 센서는 0.5초에 한 장이라 사이사이를 놓칩니다. 촬영 비행 속도를 ${v}m/s로 낮출까요?`,
+    ()=>{spec.speed=v;$("pSpeed").value=v;fleetChanged()},false,{yes:`${v}m/s로 낮추기`,no:"그대로 두기"});
+}
 $("fleetBody").addEventListener("change",e=>{
   const t=e.target;
   if(t.dataset.en){fleet[+t.dataset.en].enabled=t.checked}

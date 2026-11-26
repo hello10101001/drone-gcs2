@@ -1109,7 +1109,14 @@ async def main():
     if a.cert and a.key:
         ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
         ctx.load_cert_chain(a.cert, a.key)
-    server = await asyncio.start_server(handle, a.host, a.port, ssl=ctx)
+    try:
+        server = await asyncio.start_server(handle, a.host, a.port, ssl=ctx)
+    except OSError as e:   # 10048 / EADDRINUSE: 브리지 창이 이미 하나 켜져 있음
+        if getattr(e, "winerror", None) == 10048 or e.errno in (98, 48, 10048):
+            sys.exit(f"[브리지] ❌ {a.port}번 포트를 이미 다른 브리지가 쓰고 있습니다. 브리지는 하나만 켜야 합니다.\n"
+                     "[브리지]    열려 있는 다른 검은 창(laptop_bridge.bat)을 모두 닫고 다시 실행하세요. "
+                     "창이 안 보이면 작업 관리자에서 python 을 끝내세요.")
+        raise
     print(f"[브리지] {'wss' if ctx else 'ws'}://{a.host}:{a.port} 에서 앱 연결 대기 ({'데모' if a.demo else '실기체'})")
     if not TOKEN:
         print("[브리지] 주의: 비밀번호 없이 실행 중입니다. 같은 네트워크의 누구나 드론에 명령을 보낼 수 있습니다. --token 으로 비밀번호를 정하세요.")
